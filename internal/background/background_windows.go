@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"syscall"
 )
 
 type controller struct {
@@ -20,11 +21,7 @@ func New(program Program, cfg Config) (Controller, error) {
 }
 
 func (c *controller) Install() error {
-	command := quoteWindowsArgument(c.config.Executable)
-	for _, arg := range c.config.Arguments {
-		command += " " + quoteWindowsArgument(arg)
-	}
-	return runTask("/Create", "/SC", "ONLOGON", "/RL", "LIMITED", "/TN", c.config.DisplayName, "/TR", command, "/F")
+	return runPowerShell(registerTaskScript(c.config))
 }
 
 func (c *controller) Uninstall() error {
@@ -83,6 +80,45 @@ func runTask(args ...string) error {
 	return nil
 }
 
+func runPowerShell(script string) error {
+	output, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return fmt.Errorf("register current-user scheduled task: %s", message)
+	}
+	return nil
+}
+
+func registerTaskScript(config Config) string {
+	action := "$action = New-ScheduledTaskAction -Execute " + quotePowerShellLiteral(config.Executable)
+	if len(config.Arguments) > 0 {
+		arguments := make([]string, len(config.Arguments))
+		for index, argument := range config.Arguments {
+			arguments[index] = quoteWindowsArgument(argument)
+		}
+		action += " -Argument " + quotePowerShellLiteral(strings.Join(arguments, " "))
+	}
+	return strings.Join([]string{
+		"$ErrorActionPreference = 'Stop'",
+		"$userId = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
+		action,
+		"$trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId",
+		"$principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited",
+		"$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero)" +
+			" -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
+		"Register-ScheduledTask -TaskName " + quotePowerShellLiteral(config.DisplayName) +
+			" -Action $action -Trigger $trigger -Principal $principal -Settings $settings" +
+			" -Description " + quotePowerShellLiteral(config.Description) + " -Force | Out-Null",
+	}, "; ")
+}
+
 func quoteWindowsArgument(value string) string {
-	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+	return syscall.EscapeArg(value)
+}
+
+func quotePowerShellLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }

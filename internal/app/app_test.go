@@ -3,15 +3,45 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/JorgeMuehlebach/repo-sync/internal/background"
 	"github.com/JorgeMuehlebach/repo-sync/internal/config"
 	"github.com/JorgeMuehlebach/repo-sync/internal/discovery"
 	"github.com/JorgeMuehlebach/repo-sync/internal/state"
 )
+
+type fakeService struct {
+	status       background.Status
+	statusErr    error
+	installErr   error
+	startErr     error
+	installCalls int
+	startCalls   int
+}
+
+func (f *fakeService) Install() error {
+	f.installCalls++
+	return f.installErr
+}
+
+func (f *fakeService) Uninstall() error { return nil }
+
+func (f *fakeService) Start() error {
+	f.startCalls++
+	return f.startErr
+}
+
+func (f *fakeService) Stop() error { return nil }
+
+func (f *fakeService) Run() error { return nil }
+
+func (f *fakeService) Status() (background.Status, error) { return f.status, f.statusErr }
 
 func TestConfigAddListAndRemove(t *testing.T) {
 	dir := t.TempDir()
@@ -122,4 +152,88 @@ func TestRepositoryLockPreventsOverlap(t *testing.T) {
 		t.Fatalf("lock could not be reacquired: %v", err)
 	}
 	releaseAgain()
+}
+
+func TestStartDoesNotEnableWhenServiceInstallFails(t *testing.T) {
+	service := &fakeService{statusErr: background.ErrNotInstalled, installErr: errors.New("access denied")}
+	application := newStartTestApplication(t, service)
+	err := application.start()
+	if err == nil || !strings.Contains(err.Error(), "install service: access denied") {
+		t.Fatalf("start() error = %v", err)
+	}
+	if service.startCalls != 0 {
+		t.Fatalf("Start() calls = %d, want 0", service.startCalls)
+	}
+	assertEnabled(t, application.statePath, false)
+}
+
+func TestStartRollsBackEnabledWhenServiceStartFails(t *testing.T) {
+	service := &fakeService{status: background.StatusStopped, startErr: errors.New("could not run task")}
+	application := newStartTestApplication(t, service)
+	err := application.start()
+	if err == nil || !strings.Contains(err.Error(), "start service: could not run task") {
+		t.Fatalf("start() error = %v", err)
+	}
+	if service.startCalls != 1 {
+		t.Fatalf("Start() calls = %d, want 1", service.startCalls)
+	}
+	assertEnabled(t, application.statePath, false)
+}
+
+func TestStartEnablesAfterServiceIsReady(t *testing.T) {
+	service := &fakeService{status: background.StatusStopped}
+	application := newStartTestApplication(t, service)
+	if err := application.start(); err != nil {
+		t.Fatal(err)
+	}
+	if service.startCalls != 1 {
+		t.Fatalf("Start() calls = %d, want 1", service.startCalls)
+	}
+	assertEnabled(t, application.statePath, true)
+}
+
+func newStartTestApplication(t *testing.T, service background.Controller) *Application {
+	t.Helper()
+	dir := t.TempDir()
+	branchURL := "https://github.com/owner/repo/tree/main"
+	configPath := filepath.Join(dir, "config.yaml")
+	statePath := filepath.Join(dir, "state.json")
+	if err := config.Save(configPath, config.Config{Interval: "5m", Repositories: []string{branchURL}}); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := discovery.ParseGitHubBranchURL(branchURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Save(statePath, state.State{Repositories: map[string]state.Repository{
+		spec.StateKey(): {Path: filepath.Join(dir, "repo")},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	return &Application{
+		version:    "test",
+		in:         bytes.NewBuffer(nil),
+		out:        &bytes.Buffer{},
+		errOut:     &bytes.Buffer{},
+		configDir:  dir,
+		configPath: configPath,
+		statePath:  statePath,
+		logPath:    filepath.Join(dir, "repo-sync.log"),
+		lockDir:    filepath.Join(dir, "locks"),
+		homeDir:    dir,
+		serviceFactory: func() (background.Controller, error) {
+			return service, nil
+		},
+	}
+}
+
+func assertEnabled(t *testing.T, path string, want bool) {
+	t.Helper()
+	machineState, err := state.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if machineState.Enabled != want {
+		t.Fatalf("Enabled = %t, want %t", machineState.Enabled, want)
+	}
 }

@@ -23,17 +23,18 @@ import (
 )
 
 type Application struct {
-	version    string
-	in         io.Reader
-	out        io.Writer
-	errOut     io.Writer
-	configDir  string
-	configPath string
-	statePath  string
-	logPath    string
-	lockDir    string
-	homeDir    string
-	syncer     gitops.Syncer
+	version        string
+	in             io.Reader
+	out            io.Writer
+	errOut         io.Writer
+	configDir      string
+	configPath     string
+	statePath      string
+	logPath        string
+	lockDir        string
+	homeDir        string
+	syncer         gitops.Syncer
+	serviceFactory func() (background.Controller, error)
 }
 
 func New(version string, in io.Reader, out, errOut io.Writer) (*Application, error) {
@@ -442,32 +443,42 @@ func (a *Application) start() error {
 			break
 		}
 	}
+	service, err := a.newService()
+	if err != nil {
+		return a.startFailure(err)
+	}
+	status, statusErr := service.Status()
+	if errors.Is(statusErr, background.ErrNotInstalled) {
+		if err := service.Install(); err != nil {
+			return a.startFailure(fmt.Errorf("install service: %w", err))
+		}
+		status = background.StatusStopped
+	} else if statusErr != nil {
+		return a.startFailure(fmt.Errorf("inspect service: %w", statusErr))
+	}
 	if err := state.Update(a.statePath, func(current *state.State) error {
 		current.Enabled = true
 		return nil
 	}); err != nil {
 		return err
 	}
-	service, err := a.newService()
-	if err != nil {
-		return err
-	}
-	status, statusErr := service.Status()
-	if errors.Is(statusErr, background.ErrNotInstalled) {
-		if err := service.Install(); err != nil {
-			return fmt.Errorf("install service: %w", err)
-		}
-		status = background.StatusStopped
-	} else if statusErr != nil {
-		return fmt.Errorf("inspect service: %w", statusErr)
-	}
 	if status != background.StatusRunning {
 		if err := service.Start(); err != nil {
-			return fmt.Errorf("start service: %w", err)
+			return a.startFailure(fmt.Errorf("start service: %w", err))
 		}
 	}
 	fmt.Fprintln(a.out, "Repo Sync is enabled and running.")
 	return nil
+}
+
+func (a *Application) startFailure(cause error) error {
+	if err := state.Update(a.statePath, func(current *state.State) error {
+		current.Enabled = false
+		return nil
+	}); err != nil {
+		return errors.Join(cause, fmt.Errorf("disable synchronization after start failure: %w", err))
+	}
+	return cause
 }
 
 func (a *Application) stop() error {
@@ -565,6 +576,9 @@ func valueOr(value, fallback string) string {
 }
 
 func (a *Application) newService() (background.Controller, error) {
+	if a.serviceFactory != nil {
+		return a.serviceFactory()
+	}
 	program := &serviceProgram{app: a}
 	executable, err := os.Executable()
 	if err != nil {
