@@ -13,6 +13,7 @@ import (
 	"github.com/JorgeMuehlebach/repo-sync/internal/background"
 	"github.com/JorgeMuehlebach/repo-sync/internal/config"
 	"github.com/JorgeMuehlebach/repo-sync/internal/discovery"
+	"github.com/JorgeMuehlebach/repo-sync/internal/gitops"
 	"github.com/JorgeMuehlebach/repo-sync/internal/state"
 )
 
@@ -23,6 +24,38 @@ type fakeService struct {
 	startErr     error
 	installCalls int
 	startCalls   int
+}
+
+type recordingGitRunner struct {
+	root  string
+	calls []string
+}
+
+func (r *recordingGitRunner) Run(_ context.Context, _ string, args ...string) gitops.Result {
+	call := strings.Join(args, " ")
+	r.calls = append(r.calls, call)
+	switch {
+	case call == "rev-parse --show-toplevel":
+		return gitops.Result{Output: r.root}
+	case call == "config --get remote.origin.url":
+		return gitops.Result{Output: "git@github.com:owner/repo.git"}
+	case call == "config --get user.name":
+		return gitops.Result{Output: "Test User"}
+	case call == "config --get user.email":
+		return gitops.Result{Output: "test@example.com"}
+	case call == "branch --show-current":
+		return gitops.Result{Output: "main"}
+	case call == "status --porcelain=v1":
+		return gitops.Result{Output: " M README.md"}
+	case call == "status --porcelain=v1 --ignored=matching":
+		return gitops.Result{Output: "!! local.env"}
+	case call == "ls-remote --exit-code --heads origin refs/heads/main":
+		return gitops.Result{Output: "abc refs/heads/main"}
+	case strings.HasPrefix(call, "rev-parse --git-path "):
+		return gitops.Result{Output: filepath.Join(r.root, ".git", args[len(args)-1])}
+	default:
+		return gitops.Result{}
+	}
 }
 
 func (f *fakeService) Install() error {
@@ -133,6 +166,218 @@ func TestSetupSelectsOneOfMultipleClones(t *testing.T) {
 	}
 	if got := machineState.Repositories[spec.StateKey()].Path; got != second {
 		t.Fatalf("selected path = %q, want %q", got, second)
+	}
+}
+
+func TestBootstrapLocalPathIsExplicitAndIdempotent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "checkout")
+	command := exec.Command("git", "init", "-b", "feature/sync", root)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	command = exec.Command("git", "-C", root, "remote", "add", "origin", "git@github.com:Owner/Repo.git")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, output)
+	}
+	dir := filepath.Join(t.TempDir(), "config")
+	application := &Application{
+		version:    "test",
+		in:         bytes.NewBuffer(nil),
+		out:        &bytes.Buffer{},
+		errOut:     &bytes.Buffer{},
+		configDir:  dir,
+		configPath: filepath.Join(dir, "config.yaml"),
+		statePath:  filepath.Join(dir, "state.json"),
+		logPath:    filepath.Join(dir, "repo-sync.log"),
+		lockDir:    filepath.Join(dir, "locks"),
+		homeDir:    t.TempDir(),
+		syncer:     gitops.NewSyncer(),
+	}
+	for range 2 {
+		if err := application.Run([]string{"bootstrap", root}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := config.Load(application.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Repositories) != 1 || cfg.Repositories[0] != "https://github.com/owner/repo/tree/feature/sync" {
+		t.Fatalf("repositories = %#v", cfg.Repositories)
+	}
+	spec, err := discovery.ParseGitHubBranchURL(cfg.Repositories[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineState, err := state.Load(application.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := machineState.Repositories[spec.StateKey()].Path; got != filepath.Clean(root) {
+		t.Fatalf("path = %q, want %q", got, root)
+	}
+}
+
+func TestBootstrapURLAdoptsDeterministicCheckout(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "repo")
+	command := exec.Command("git", "init", "-b", "main", root)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	command = exec.Command("git", "-C", root, "remote", "add", "origin", "https://github.com/owner/repo.git")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v\n%s", err, output)
+	}
+	dir := filepath.Join(home, "config")
+	application := &Application{
+		version:    "test",
+		in:         bytes.NewBuffer(nil),
+		out:        &bytes.Buffer{},
+		errOut:     &bytes.Buffer{},
+		configDir:  dir,
+		configPath: filepath.Join(dir, "config.yaml"),
+		statePath:  filepath.Join(dir, "state.json"),
+		logPath:    filepath.Join(dir, "repo-sync.log"),
+		lockDir:    filepath.Join(dir, "locks"),
+		homeDir:    home,
+		syncer:     gitops.NewSyncer(),
+	}
+	branchURL := "https://github.com/owner/repo/tree/main"
+	if err := application.Run([]string{"bootstrap", branchURL}); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := discovery.ParseGitHubBranchURL(branchURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineState, err := state.Load(application.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := machineState.Repositories[spec.StateKey()].Path; got != filepath.Clean(root) {
+		t.Fatalf("path = %q, want %q", got, root)
+	}
+}
+
+func TestSyncDryRunDoesNotMutateRepositoryOrState(t *testing.T) {
+	root := filepath.Clean(t.TempDir())
+	dir := t.TempDir()
+	branchURL := "https://github.com/owner/repo/tree/main"
+	configPath := filepath.Join(dir, "config.yaml")
+	statePath := filepath.Join(dir, "state.json")
+	if err := config.Save(configPath, config.Config{Interval: "5m", Repositories: []string{branchURL}}); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := discovery.ParseGitHubBranchURL(branchURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Save(statePath, state.State{Repositories: map[string]state.Repository{
+		spec.StateKey(): {Path: root, LastError: "preserve me"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingGitRunner{root: root}
+	var output bytes.Buffer
+	application := &Application{
+		out:        &output,
+		errOut:     &output,
+		configDir:  dir,
+		configPath: configPath,
+		statePath:  statePath,
+		logPath:    filepath.Join(dir, "repo-sync.log"),
+		lockDir:    filepath.Join(dir, "locks"),
+		syncer:     gitops.Syncer{Git: runner},
+	}
+	if err := application.Run([]string{"sync", "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("state changed during dry run\nbefore: %s\nafter: %s", before, after)
+	}
+	for _, call := range runner.calls {
+		for _, mutating := range []string{"add ", "commit ", "fetch ", "rebase ", "push "} {
+			if strings.HasPrefix(call, mutating) {
+				t.Fatalf("dry run executed %q", call)
+			}
+		}
+	}
+	if _, err := os.Stat(application.lockDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry run created lock directory: %v", err)
+	}
+	if _, err := os.Stat(application.logPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dry run created a log: %v", err)
+	}
+	if !strings.Contains(output.String(), "M README.md") {
+		t.Fatalf("dry-run output = %q", output.String())
+	}
+}
+
+func TestDoctorIsReadOnlyAndChecksRemote(t *testing.T) {
+	root := filepath.Clean(t.TempDir())
+	dir := t.TempDir()
+	branchURL := "https://github.com/owner/repo/tree/main"
+	configPath := filepath.Join(dir, "config.yaml")
+	statePath := filepath.Join(dir, "state.json")
+	if err := config.Save(configPath, config.Config{Interval: "5m", Repositories: []string{branchURL}}); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := discovery.ParseGitHubBranchURL(branchURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Save(statePath, state.State{Repositories: map[string]state.Repository{
+		spec.StateKey(): {Path: root},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingGitRunner{root: root}
+	service := &fakeService{status: background.StatusStopped}
+	var output bytes.Buffer
+	application := &Application{
+		out:        &output,
+		errOut:     &output,
+		configDir:  dir,
+		configPath: configPath,
+		statePath:  statePath,
+		logPath:    filepath.Join(dir, "repo-sync.log"),
+		lockDir:    filepath.Join(dir, "locks"),
+		syncer:     gitops.Syncer{Git: runner},
+		serviceFactory: func() (background.Controller, error) {
+			return service, nil
+		},
+	}
+	if err := application.Run([]string{"doctor"}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("state changed during doctor\nbefore: %s\nafter: %s", before, after)
+	}
+	if !strings.Contains(output.String(), "PASS owner/repo (main) remote access") || !strings.Contains(output.String(), "WARN owner/repo (main) has 1 ignored path") {
+		t.Fatalf("doctor output = %q", output.String())
+	}
+	if _, err := os.Stat(application.lockDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("doctor created lock directory: %v", err)
+	}
+	if _, err := os.Stat(application.logPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("doctor created a log: %v", err)
 	}
 }
 

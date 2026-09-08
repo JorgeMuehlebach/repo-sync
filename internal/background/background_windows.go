@@ -58,18 +58,37 @@ func (c *controller) Run() error {
 }
 
 func (c *controller) Status() (Status, error) {
-	if err := runTask("/Query", "/TN", c.config.DisplayName); err != nil {
-		return StatusUnknown, ErrNotInstalled
+	output, err := exec.Command("schtasks", "/Query", "/TN", c.config.DisplayName).CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if taskNotFound(message) {
+			return StatusUnknown, ErrNotInstalled
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		return StatusUnknown, fmt.Errorf("query scheduled task: %s", message)
 	}
 	script := fmt.Sprintf("(Get-ScheduledTask -TaskName '%s').State", strings.ReplaceAll(c.config.DisplayName, "'", "''"))
-	output, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	output, err = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
 	if err != nil {
-		return StatusUnknown, nil
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return StatusUnknown, fmt.Errorf("read scheduled task state: %s", message)
 	}
 	if strings.EqualFold(strings.TrimSpace(string(output)), "Running") {
 		return StatusRunning, nil
 	}
 	return StatusStopped, nil
+}
+
+func taskNotFound(message string) bool {
+	message = strings.ToLower(message)
+	return strings.Contains(message, "cannot find the file specified") ||
+		strings.Contains(message, "cannot find the task") ||
+		strings.Contains(message, "does not exist")
 }
 
 func runTask(args ...string) error {

@@ -73,6 +73,8 @@ func (a *Application) Run(args []string) error {
 	case "version", "-v", "--version":
 		fmt.Fprintln(a.out, a.version)
 		return nil
+	case "bootstrap":
+		return a.bootstrap(context.Background(), args[1:])
 	case "setup":
 		return a.setup(context.Background())
 	case "start":
@@ -84,7 +86,18 @@ func (a *Application) Run(args []string) error {
 	case "status":
 		return a.status()
 	case "sync":
+		if len(args) == 2 && args[1] == "--dry-run" {
+			return a.dryRun(context.Background())
+		}
+		if len(args) != 1 {
+			return fmt.Errorf("usage: repo-sync sync [--dry-run]")
+		}
 		return a.syncAll(context.Background(), true)
+	case "doctor":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: repo-sync doctor")
+		}
+		return a.doctor(context.Background())
 	case "config":
 		return a.configCommand(args[1:])
 	case "run":
@@ -98,16 +111,154 @@ func (a *Application) printUsage() {
 	fmt.Fprintln(a.out, `Repo Sync keeps selected GitHub branches synchronized across computers.
 
 Usage:
+  repo-sync bootstrap <repository-path|github-branch-url> [--start]
   repo-sync setup
   repo-sync start
   repo-sync stop
   repo-sync status
-  repo-sync sync
+  repo-sync sync [--dry-run]
+  repo-sync doctor
   repo-sync uninstall
   repo-sync config add <github-branch-url>
   repo-sync config remove <github-branch-url>
   repo-sync config list
   repo-sync version`)
+}
+
+func (a *Application) bootstrap(ctx context.Context, args []string) error {
+	var target string
+	start := false
+	for _, argument := range args {
+		switch {
+		case argument == "--start":
+			start = true
+		case strings.HasPrefix(argument, "-"):
+			return fmt.Errorf("unknown bootstrap option %q", argument)
+		case target == "":
+			target = argument
+		default:
+			return fmt.Errorf("usage: repo-sync bootstrap <repository-path|github-branch-url> [--start]")
+		}
+	}
+	if target == "" {
+		return fmt.Errorf("usage: repo-sync bootstrap <repository-path|github-branch-url> [--start]")
+	}
+
+	var spec discovery.RepositorySpec
+	var selected string
+	var err error
+	if strings.Contains(target, "://") {
+		spec, err = discovery.ParseGitHubBranchURL(target)
+		if err == nil {
+			selected, err = a.bootstrapURL(ctx, spec)
+		}
+	} else {
+		selected, err = a.expandPath(target)
+		if err == nil {
+			spec, selected, err = discovery.SpecFromPath(ctx, selected)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if err := a.saveBootstrap(spec, selected); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "Configured %s (%s) at %s\n", spec.Key, spec.Branch, selected)
+	if !start {
+		fmt.Fprintln(a.out, "Run repo-sync start when you are ready to enable automatic synchronization.")
+		return nil
+	}
+	if err := a.requireResolvedRepositories(); err != nil {
+		return err
+	}
+	fmt.Fprintln(a.out, "Warning: automatic synchronization stages all non-ignored changes, commits, rebases, and pushes.")
+	return a.start()
+}
+
+func (a *Application) bootstrapURL(ctx context.Context, spec discovery.RepositorySpec) (string, error) {
+	machineState, err := state.Load(a.statePath)
+	if err != nil {
+		return "", err
+	}
+	selected := machineState.Repositories[spec.StateKey()].Path
+	if selected == "" {
+		selected = filepath.Join(a.homeDir, spec.Name)
+	}
+	selected, err = a.expandPath(selected)
+	if err != nil {
+		return "", err
+	}
+	info, statErr := os.Stat(selected)
+	if statErr == nil {
+		if !info.IsDir() {
+			return "", fmt.Errorf("%s exists and is not a directory", selected)
+		}
+		if err := discovery.ValidatePath(ctx, selected, spec); err != nil {
+			return "", err
+		}
+		if _, err := a.syncer.Inspect(ctx, selected, spec); err != nil {
+			return "", err
+		}
+		return selected, nil
+	}
+	if !errors.Is(statErr, os.ErrNotExist) {
+		return "", statErr
+	}
+	if err := os.MkdirAll(filepath.Dir(selected), 0o755); err != nil {
+		return "", err
+	}
+	fmt.Fprintf(a.out, "Cloning %s into %s...\n", spec.CloneURL, selected)
+	cmd := exec.CommandContext(ctx, "git", "clone", "--branch", spec.Branch, "--single-branch", spec.CloneURL, selected)
+	cmd.Stdout = a.out
+	cmd.Stderr = a.errOut
+	cmd.Stdin = a.in
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("clone %s: %w", spec.Key, err)
+	}
+	return selected, nil
+}
+
+func (a *Application) saveBootstrap(spec discovery.RepositorySpec, selected string) error {
+	if err := config.Update(a.configPath, func(current *config.Config) error {
+		for _, raw := range current.Repositories {
+			existing, err := discovery.ParseGitHubBranchURL(raw)
+			if err == nil && existing.StateKey() == spec.StateKey() {
+				return nil
+			}
+		}
+		current.Repositories = append(current.Repositories, spec.OriginalURL)
+		return nil
+	}); err != nil {
+		return err
+	}
+	return state.Update(a.statePath, func(current *state.State) error {
+		repository := current.Repositories[spec.StateKey()]
+		repository.Path = selected
+		current.Repositories[spec.StateKey()] = repository
+		return nil
+	})
+}
+
+func (a *Application) requireResolvedRepositories() error {
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		return err
+	}
+	machineState, err := state.Load(a.statePath)
+	if err != nil {
+		return err
+	}
+	for _, raw := range cfg.Repositories {
+		spec, err := discovery.ParseGitHubBranchURL(raw)
+		if err != nil {
+			return err
+		}
+		if machineState.Repositories[spec.StateKey()].Path == "" {
+			return fmt.Errorf("%s (%s) has no local path; bootstrap it or run repo-sync setup before --start", spec.Key, spec.Branch)
+		}
+	}
+	return nil
 }
 
 func (a *Application) configCommand(args []string) error {
@@ -320,6 +471,138 @@ func (a *Application) expandPath(value string) (string, error) {
 		value = filepath.Join(a.homeDir, value[2:])
 	}
 	return filepath.Abs(value)
+}
+
+func (a *Application) dryRun(ctx context.Context) error {
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		return err
+	}
+	machineState, err := state.Load(a.statePath)
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, raw := range cfg.Repositories {
+		spec, parseErr := discovery.ParseGitHubBranchURL(raw)
+		if parseErr != nil {
+			failures = append(failures, parseErr)
+			continue
+		}
+		repoState := machineState.Repositories[spec.StateKey()]
+		fmt.Fprintf(a.out, "Checking %s (%s)...\n", spec.Key, spec.Branch)
+		if repoState.Path == "" {
+			failures = append(failures, fmt.Errorf("%s (%s) has no local path; bootstrap it or run repo-sync setup", spec.Key, spec.Branch))
+			continue
+		}
+		inspection, inspectErr := a.syncer.Inspect(ctx, repoState.Path, spec)
+		if inspectErr != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", spec.Key, inspectErr))
+			continue
+		}
+		if len(inspection.Changes) == 0 {
+			fmt.Fprintln(a.out, "  working tree is clean")
+		} else {
+			fmt.Fprintln(a.out, "  changes that would be staged and committed:")
+			for _, change := range inspection.Changes {
+				fmt.Fprintf(a.out, "    %s\n", change)
+			}
+		}
+		fmt.Fprintf(a.out, "  would fetch origin %s, rebase, and push HEAD:%s\n", spec.Branch, spec.Branch)
+	}
+	return errors.Join(failures...)
+}
+
+func (a *Application) doctor(ctx context.Context) error {
+	fmt.Fprintln(a.out, "Repo Sync doctor")
+	var failures []error
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		fmt.Fprintln(a.out, "FAIL git executable was not found on PATH")
+		return err
+	}
+	fmt.Fprintf(a.out, "PASS git executable: %s\n", gitPath)
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		fmt.Fprintf(a.out, "FAIL config: %v\n", err)
+		return err
+	}
+	fmt.Fprintf(a.out, "PASS config: %s\n", a.configPath)
+	machineState, err := state.Load(a.statePath)
+	if err != nil {
+		fmt.Fprintf(a.out, "FAIL state: %v\n", err)
+		return err
+	}
+	if len(cfg.Repositories) == 0 {
+		failure := fmt.Errorf("no repositories are configured")
+		fmt.Fprintf(a.out, "FAIL repositories: %v\n", failure)
+		failures = append(failures, failure)
+	}
+	for _, raw := range cfg.Repositories {
+		spec, parseErr := discovery.ParseGitHubBranchURL(raw)
+		if parseErr != nil {
+			fmt.Fprintf(a.out, "FAIL repository config: %v\n", parseErr)
+			failures = append(failures, parseErr)
+			continue
+		}
+		label := fmt.Sprintf("%s (%s)", spec.Key, spec.Branch)
+		repoState := machineState.Repositories[spec.StateKey()]
+		if repoState.Path == "" {
+			failure := fmt.Errorf("local path is not configured")
+			fmt.Fprintf(a.out, "FAIL %s: %v\n", label, failure)
+			failures = append(failures, fmt.Errorf("%s: %w", label, failure))
+			continue
+		}
+		if _, inspectErr := a.syncer.Inspect(ctx, repoState.Path, spec); inspectErr != nil {
+			fmt.Fprintf(a.out, "FAIL %s local checkout: %v\n", label, inspectErr)
+			failures = append(failures, fmt.Errorf("%s: %w", label, inspectErr))
+			continue
+		}
+		fmt.Fprintf(a.out, "PASS %s local checkout: %s\n", label, repoState.Path)
+		if identityErr := a.syncer.CheckIdentity(ctx, repoState.Path); identityErr != nil {
+			fmt.Fprintf(a.out, "FAIL %s identity: %v\n", label, identityErr)
+			failures = append(failures, fmt.Errorf("%s: %w", label, identityErr))
+		} else {
+			fmt.Fprintf(a.out, "PASS %s Git identity\n", label)
+		}
+		remoteCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		remoteErr := a.syncer.CheckRemote(remoteCtx, repoState.Path, spec)
+		cancel()
+		if remoteErr != nil {
+			fmt.Fprintf(a.out, "FAIL %s remote access: %v\n", label, remoteErr)
+			failures = append(failures, fmt.Errorf("%s: %w", label, remoteErr))
+		} else {
+			fmt.Fprintf(a.out, "PASS %s remote access\n", label)
+		}
+		ignored, ignoredErr := a.syncer.Ignored(ctx, repoState.Path)
+		if ignoredErr != nil {
+			fmt.Fprintf(a.out, "FAIL %s ignored-file check: %v\n", label, ignoredErr)
+			failures = append(failures, fmt.Errorf("%s: %w", label, ignoredErr))
+		} else if len(ignored) > 0 {
+			fmt.Fprintf(a.out, "WARN %s has %d ignored path(s); these will not be synchronized\n", label, len(ignored))
+		}
+	}
+	service, serviceErr := a.newService()
+	if serviceErr != nil {
+		fmt.Fprintf(a.out, "FAIL service: %v\n", serviceErr)
+		failures = append(failures, serviceErr)
+	} else {
+		switch serviceStatus, statusErr := service.Status(); {
+		case errors.Is(statusErr, background.ErrNotInstalled):
+			fmt.Fprintln(a.out, "WARN service is not installed; repo-sync start will install it")
+		case statusErr != nil:
+			fmt.Fprintf(a.out, "FAIL service: %v\n", statusErr)
+			failures = append(failures, statusErr)
+		case serviceStatus == background.StatusRunning:
+			fmt.Fprintln(a.out, "PASS service is running")
+		default:
+			fmt.Fprintln(a.out, "WARN service is installed but stopped")
+		}
+	}
+	if len(failures) == 0 {
+		fmt.Fprintln(a.out, "Doctor found no blocking problems.")
+	}
+	return errors.Join(failures...)
 }
 
 func (a *Application) syncAll(ctx context.Context, printProgress bool) error {

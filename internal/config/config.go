@@ -24,11 +24,46 @@ func Default() Config {
 }
 
 func DefaultDir() (string, error) {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("find user config directory: %w", err)
+	return defaultDir()
+}
+
+func copyLegacyFiles(legacyDir, canonicalDir string) error {
+	for _, name := range []string{"config.yaml", "state.json"} {
+		source := filepath.Join(legacyDir, name)
+		data, err := os.ReadFile(source)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read legacy %s: %w", source, err)
+		}
+		if err := os.MkdirAll(canonicalDir, 0o755); err != nil {
+			return fmt.Errorf("create config directory: %w", err)
+		}
+		destination := filepath.Join(canonicalDir, name)
+		file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("create migrated %s: %w", destination, err)
+		}
+		if _, err := file.Write(data); err != nil {
+			_ = file.Close()
+			_ = os.Remove(destination)
+			return fmt.Errorf("copy legacy %s: %w", source, err)
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			_ = os.Remove(destination)
+			return fmt.Errorf("sync migrated %s: %w", destination, err)
+		}
+		if err := file.Close(); err != nil {
+			_ = os.Remove(destination)
+			return fmt.Errorf("close migrated %s: %w", destination, err)
+		}
 	}
-	return filepath.Join(base, "repo-sync"), nil
+	return nil
 }
 
 func DefaultPath() (string, error) {

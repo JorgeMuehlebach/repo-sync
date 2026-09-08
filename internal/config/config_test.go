@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -84,5 +85,54 @@ func TestDurationRejectsInvalidValues(t *testing.T) {
 	}
 	if got, err := (Config{Interval: "5m"}).Duration(); err != nil || got != 5*time.Minute {
 		t.Fatalf("Duration(5m) = %v, %v", got, err)
+	}
+}
+
+func TestCopyLegacyFilesPreservesExistingAndLeavesLegacy(t *testing.T) {
+	root := t.TempDir()
+	legacy := filepath.Join(root, "legacy")
+	canonical := filepath.Join(root, "canonical")
+	if err := os.MkdirAll(legacy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "config.yaml"), []byte("legacy config"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "state.json"), []byte("legacy state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "repo-sync.log"), []byte("do not copy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(canonical, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonical, "config.yaml"), []byte("canonical config"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyLegacyFiles(legacy, canonical); err != nil {
+		t.Fatal(err)
+	}
+
+	configData, err := os.ReadFile(filepath.Join(canonical, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(configData) != "canonical config" {
+		t.Fatalf("canonical config was overwritten: %q", configData)
+	}
+	stateData, err := os.ReadFile(filepath.Join(canonical, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stateData) != "legacy state" {
+		t.Fatalf("migrated state = %q", stateData)
+	}
+	if _, err := os.Stat(filepath.Join(canonical, "repo-sync.log")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("log was migrated: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacy, "state.json")); err != nil {
+		t.Fatalf("legacy state was removed: %v", err)
 	}
 }

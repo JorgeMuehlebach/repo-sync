@@ -52,3 +52,12 @@ func TestRegisterTaskScriptUsesCurrentUserInteractiveTask(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskNotFoundDoesNotMaskOtherFailures(t *testing.T) {
+	if !taskNotFound("ERROR: The system cannot find the file specified.") {
+		t.Fatal("missing task was not recognized")
+	}
+	if taskNotFound("ERROR: Access is denied.") {
+		t.Fatal("access failure was treated as a missing task")
+	}
+}
