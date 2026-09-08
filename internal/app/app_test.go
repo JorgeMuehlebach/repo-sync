@@ -213,8 +213,11 @@ func TestBootstrapLocalPathIsExplicitAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := machineState.Repositories[spec.StateKey()].Path; got != filepath.Clean(root) {
-		t.Fatalf("path = %q, want %q", got, root)
+	got := machineState.Repositories[spec.StateKey()].Path
+	gotInfo, gotErr := os.Stat(got)
+	wantInfo, wantErr := os.Stat(root)
+	if gotErr != nil || wantErr != nil || !os.SameFile(gotInfo, wantInfo) {
+		t.Fatalf("path = %q, want the same checkout as %q", got, root)
 	}
 }
 
