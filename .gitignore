@@ -1,0 +1,4 @@
+/repo-sync
+/dist/
+*.log
+.DS_Store
