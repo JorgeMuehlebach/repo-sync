@@ -6,12 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/JorgeMuehlebach/repo-sync/internal/discovery"
 )
 
 const defaultCommitMessage = "chore: automatic repository sync"
+
+var credentialURL = regexp.MustCompile(`(?i)(https?://)[^/@\s]+@`)
 
 type Result struct {
 	Output   string
@@ -128,7 +131,7 @@ func (s Syncer) validate(ctx context.Context, repoPath string, spec discovery.Re
 	}
 	key, err := discovery.CanonicalRemote(remote.Output)
 	if err != nil || key != spec.Key {
-		return fmt.Errorf("origin remote %q does not match configured repository %s", remote.Output, spec.Key)
+		return fmt.Errorf("origin remote does not match configured repository %s", spec.Key)
 	}
 	branch := s.Git.Run(ctx, repoPath, "branch", "--show-current")
 	if branch.Err != nil {
@@ -163,5 +166,9 @@ func commandError(result Result, action string) error {
 	if result.Output == "" {
 		return fmt.Errorf("%s: %w", action, result.Err)
 	}
-	return fmt.Errorf("%s: %s", action, result.Output)
+	return fmt.Errorf("%s: %s", action, redact(result.Output))
+}
+
+func redact(value string) string {
+	return credentialURL.ReplaceAllString(value, `${1}***@`)
 }

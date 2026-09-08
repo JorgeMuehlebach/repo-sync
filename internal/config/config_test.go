@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -24,6 +26,38 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Load() = %#v, want %#v", got, want)
+	}
+}
+
+func TestConcurrentUpdatesPreserveRepositories(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	const count = 12
+	errorsFound := make(chan error, count)
+	var group sync.WaitGroup
+	for i := 0; i < count; i++ {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			err := Update(path, func(cfg *Config) error {
+				cfg.Repositories = append(cfg.Repositories, "repo-"+strconv.Itoa(index))
+				return nil
+			})
+			if err != nil {
+				errorsFound <- err
+			}
+		}(i)
+	}
+	group.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		t.Error(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Repositories) != count {
+		t.Fatalf("repository count = %d, want %d", len(cfg.Repositories), count)
 	}
 }
 

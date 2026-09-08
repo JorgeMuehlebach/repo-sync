@@ -35,12 +35,15 @@ func (c *controller) Uninstall() error {
 }
 
 func (c *controller) Start() error {
+	if err := runTask("/Change", "/TN", c.config.DisplayName, "/ENABLE"); err != nil {
+		return err
+	}
 	return runTask("/Run", "/TN", c.config.DisplayName)
 }
 
 func (c *controller) Stop() error {
 	_ = runTask("/End", "/TN", c.config.DisplayName)
-	return nil
+	return runTask("/Change", "/TN", c.config.DisplayName, "/DISABLE")
 }
 
 func (c *controller) Run() error {

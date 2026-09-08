@@ -18,6 +18,12 @@ func TestParseGitHubBranchURLRejectsMissingBranch(t *testing.T) {
 	}
 }
 
+func TestParseGitHubBranchURLRejectsCredentials(t *testing.T) {
+	if _, err := ParseGitHubBranchURL("https://token@github.com/owner/repo/tree/main"); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
 func TestCanonicalRemote(t *testing.T) {
 	tests := map[string]string{
 		"https://github.com/Owner/Repo.git":   "owner/repo",
@@ -32,5 +38,8 @@ func TestCanonicalRemote(t *testing.T) {
 		if got != want {
 			t.Fatalf("CanonicalRemote(%q) = %q, want %q", input, got, want)
 		}
+	}
+	if _, err := CanonicalRemote("https://token@github.com/owner/repo.git"); err == nil {
+		t.Fatal("expected credential-bearing remote to be rejected")
 	}
 }

@@ -12,13 +12,16 @@ import (
 )
 
 var skippedDirectories = map[string]bool{
-	"Library":      true,
-	"node_modules": true,
-	"vendor":       true,
-	"target":       true,
-	"dist":         true,
-	"build":        true,
-	".cache":       true,
+	"Library":          true,
+	"AppData":          true,
+	"Application Data": true,
+	"Local Settings":   true,
+	"node_modules":     true,
+	"vendor":           true,
+	"target":           true,
+	"dist":             true,
+	"build":            true,
+	".cache":           true,
 }
 
 func Find(ctx context.Context, roots []string, wanted map[string]bool) (map[string][]string, error) {

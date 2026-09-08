@@ -28,6 +28,9 @@ func ParseGitHubBranchURL(raw string) (RepositorySpec, error) {
 	if !strings.EqualFold(u.Scheme, "https") || !strings.EqualFold(u.Hostname(), "github.com") {
 		return RepositorySpec{}, fmt.Errorf("repository URL must be an https://github.com link")
 	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return RepositorySpec{}, fmt.Errorf("repository URL cannot contain credentials, query parameters, or fragments")
+	}
 	parts := escapedPathParts(u.EscapedPath())
 	if len(parts) < 4 || parts[2] != "tree" {
 		return RepositorySpec{}, fmt.Errorf("repository URL must include a branch, for example https://github.com/owner/repo/tree/main")
@@ -52,8 +55,12 @@ func ParseGitHubBranchURL(raw string) (RepositorySpec, error) {
 	if owner == "" || name == "" || branch == "" {
 		return RepositorySpec{}, fmt.Errorf("repository owner, name, and branch are required")
 	}
+	escapedBranch := make([]string, 0, len(branchParts))
+	for _, part := range branchParts {
+		escapedBranch = append(escapedBranch, url.PathEscape(part))
+	}
 	return RepositorySpec{
-		OriginalURL: raw,
+		OriginalURL: fmt.Sprintf("https://github.com/%s/%s/tree/%s", owner, name, strings.Join(escapedBranch, "/")),
 		Owner:       owner,
 		Name:        name,
 		Branch:      branch,
@@ -81,6 +88,14 @@ func CanonicalRemote(raw string) (string, error) {
 	}
 	if !strings.EqualFold(u.Hostname(), "github.com") {
 		return "", fmt.Errorf("remote is not hosted on github.com")
+	}
+	allowedSSHUser := false
+	if u.User != nil && strings.EqualFold(u.Scheme, "ssh") && u.User.Username() == "git" {
+		_, hasPassword := u.User.Password()
+		allowedSSHUser = !hasPassword
+	}
+	if (u.User != nil && !allowedSSHUser) || u.RawQuery != "" {
+		return "", fmt.Errorf("remote URL cannot contain credentials or query parameters; use a credential manager")
 	}
 	return canonicalOwnerRepo(strings.TrimPrefix(path.Clean(u.Path), "/"))
 }

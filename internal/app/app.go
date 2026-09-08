@@ -123,7 +123,12 @@ func (a *Application) configCommand(args []string) error {
 			fmt.Fprintln(a.out, "No repositories configured.")
 		}
 		for _, raw := range cfg.Repositories {
-			fmt.Fprintln(a.out, raw)
+			spec, err := discovery.ParseGitHubBranchURL(raw)
+			if err != nil {
+				fmt.Fprintf(a.out, "[invalid repository entry: %v]\n", err)
+				continue
+			}
+			fmt.Fprintln(a.out, spec.OriginalURL)
 		}
 		fmt.Fprintf(a.out, "Config: %s\n", a.configPath)
 		return nil
@@ -135,14 +140,16 @@ func (a *Application) configCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		for _, raw := range cfg.Repositories {
-			existing, err := discovery.ParseGitHubBranchURL(raw)
-			if err == nil && existing.StateKey() == candidate.StateKey() {
-				return fmt.Errorf("%s is already configured", candidate.OriginalURL)
+		if err := config.Update(a.configPath, func(current *config.Config) error {
+			for _, raw := range current.Repositories {
+				existing, err := discovery.ParseGitHubBranchURL(raw)
+				if err == nil && existing.StateKey() == candidate.StateKey() {
+					return fmt.Errorf("%s is already configured", candidate.OriginalURL)
+				}
 			}
-		}
-		cfg.Repositories = append(cfg.Repositories, args[1])
-		if err := config.Save(a.configPath, cfg); err != nil {
+			current.Repositories = append(current.Repositories, candidate.OriginalURL)
+			return nil
+		}); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.out, "Added %s\n", args[1])
@@ -155,27 +162,30 @@ func (a *Application) configCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		filtered := make([]string, 0, len(cfg.Repositories))
-		removed := false
-		for _, raw := range cfg.Repositories {
-			existing, parseErr := discovery.ParseGitHubBranchURL(raw)
-			if parseErr == nil && existing.StateKey() == candidate.StateKey() {
-				removed = true
-				continue
+		if err := config.Update(a.configPath, func(current *config.Config) error {
+			filtered := make([]string, 0, len(current.Repositories))
+			removed := false
+			for _, raw := range current.Repositories {
+				existing, parseErr := discovery.ParseGitHubBranchURL(raw)
+				if parseErr == nil && existing.StateKey() == candidate.StateKey() {
+					removed = true
+					continue
+				}
+				filtered = append(filtered, raw)
 			}
-			filtered = append(filtered, raw)
-		}
-		if !removed {
-			return fmt.Errorf("%s is not configured", args[1])
-		}
-		cfg.Repositories = filtered
-		if err := config.Save(a.configPath, cfg); err != nil {
+			if !removed {
+				return fmt.Errorf("%s is not configured", args[1])
+			}
+			current.Repositories = filtered
+			return nil
+		}); err != nil {
 			return err
 		}
-		machineState, err := state.Load(a.statePath)
-		if err == nil {
-			delete(machineState.Repositories, candidate.StateKey())
-			_ = state.Save(a.statePath, machineState)
+		if err := state.Update(a.statePath, func(current *state.State) error {
+			delete(current.Repositories, candidate.StateKey())
+			return nil
+		}); err != nil {
+			return err
 		}
 		fmt.Fprintf(a.out, "Removed %s\n", args[1])
 		return nil
@@ -197,7 +207,7 @@ func (a *Application) setup(ctx context.Context) error {
 	for _, raw := range cfg.Repositories {
 		spec, err := discovery.ParseGitHubBranchURL(raw)
 		if err != nil {
-			return fmt.Errorf("%s: %w", raw, err)
+			return fmt.Errorf("invalid repository configuration: %w", err)
 		}
 		specs = append(specs, spec)
 		wanted[spec.Key] = true
@@ -215,22 +225,24 @@ func (a *Application) setup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	machineState, err := state.Load(a.statePath)
-	if err != nil {
-		return err
-	}
 	reader := bufio.NewReader(a.in)
+	selectedPaths := make(map[string]string)
 	for _, spec := range specs {
 		selected, err := a.selectRepository(ctx, reader, spec, matches[spec.Key])
 		if err != nil {
 			return err
 		}
-		repoState := machineState.Repositories[spec.StateKey()]
-		repoState.Path = selected
-		machineState.Repositories[spec.StateKey()] = repoState
+		selectedPaths[spec.StateKey()] = selected
 		fmt.Fprintf(a.out, "Configured %s (%s) at %s\n", spec.Key, spec.Branch, selected)
 	}
-	if err := state.Save(a.statePath, machineState); err != nil {
+	if err := state.Update(a.statePath, func(current *state.State) error {
+		for key, selected := range selectedPaths {
+			repoState := current.Repositories[key]
+			repoState.Path = selected
+			current.Repositories[key] = repoState
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.out, "Setup complete. Config: %s\n", a.configPath)
@@ -314,10 +326,6 @@ func (a *Application) syncAll(ctx context.Context, printProgress bool) error {
 	if err != nil {
 		return err
 	}
-	machineState, err := state.Load(a.statePath)
-	if err != nil {
-		return err
-	}
 	var failures []error
 	for _, raw := range cfg.Repositories {
 		spec, parseErr := discovery.ParseGitHubBranchURL(raw)
@@ -325,11 +333,18 @@ func (a *Application) syncAll(ctx context.Context, printProgress bool) error {
 			failures = append(failures, parseErr)
 			continue
 		}
+		machineState, loadErr := state.Load(a.statePath)
+		if loadErr != nil {
+			failures = append(failures, loadErr)
+			continue
+		}
 		repoState := machineState.Repositories[spec.StateKey()]
 		if repoState.Path == "" {
 			err := fmt.Errorf("%s (%s) has no local path; run repo-sync setup", spec.Key, spec.Branch)
 			repoState.LastError = err.Error()
-			machineState.Repositories[spec.StateKey()] = repoState
+			if updateErr := a.updateRepositoryState(spec.StateKey(), repoState); updateErr != nil {
+				failures = append(failures, updateErr)
+			}
 			failures = append(failures, err)
 			continue
 		}
@@ -339,7 +354,9 @@ func (a *Application) syncAll(ctx context.Context, printProgress bool) error {
 		release, lockErr := a.acquireLock(spec.StateKey())
 		if lockErr != nil {
 			repoState.LastError = lockErr.Error()
-			machineState.Repositories[spec.StateKey()] = repoState
+			if updateErr := a.updateRepositoryState(spec.StateKey(), repoState); updateErr != nil {
+				failures = append(failures, updateErr)
+			}
 			failures = append(failures, lockErr)
 			continue
 		}
@@ -359,15 +376,18 @@ func (a *Application) syncAll(ctx context.Context, printProgress bool) error {
 			}
 			a.logf("sync completed for %s (%s)", spec.Key, spec.Branch)
 		}
-		machineState.Repositories[spec.StateKey()] = repoState
-		if err := state.Save(a.statePath, machineState); err != nil {
-			failures = append(failures, err)
+		if updateErr := a.updateRepositoryState(spec.StateKey(), repoState); updateErr != nil {
+			failures = append(failures, updateErr)
 		}
 	}
-	if err := state.Save(a.statePath, machineState); err != nil {
-		failures = append(failures, err)
-	}
 	return errors.Join(failures...)
+}
+
+func (a *Application) updateRepositoryState(key string, repoState state.Repository) error {
+	return state.Update(a.statePath, func(current *state.State) error {
+		current.Repositories[key] = repoState
+		return nil
+	})
 }
 
 func (a *Application) acquireLock(key string) (func(), error) {
@@ -422,8 +442,10 @@ func (a *Application) start() error {
 			break
 		}
 	}
-	machineState.Enabled = true
-	if err := state.Save(a.statePath, machineState); err != nil {
+	if err := state.Update(a.statePath, func(current *state.State) error {
+		current.Enabled = true
+		return nil
+	}); err != nil {
 		return err
 	}
 	service, err := a.newService()
@@ -449,12 +471,10 @@ func (a *Application) start() error {
 }
 
 func (a *Application) stop() error {
-	machineState, err := state.Load(a.statePath)
-	if err != nil {
-		return err
-	}
-	machineState.Enabled = false
-	if err := state.Save(a.statePath, machineState); err != nil {
+	if err := state.Update(a.statePath, func(current *state.State) error {
+		current.Enabled = false
+		return nil
+	}); err != nil {
 		return err
 	}
 	service, err := a.newService()
@@ -521,7 +541,7 @@ func (a *Application) status() error {
 	for _, raw := range cfg.Repositories {
 		spec, parseErr := discovery.ParseGitHubBranchURL(raw)
 		if parseErr != nil {
-			fmt.Fprintf(a.out, "- %s: invalid configuration: %v\n", raw, parseErr)
+			fmt.Fprintf(a.out, "- invalid repository configuration: %v\n", parseErr)
 			continue
 		}
 		repoState := machineState.Repositories[spec.StateKey()]

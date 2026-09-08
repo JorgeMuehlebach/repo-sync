@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/JorgeMuehlebach/repo-sync/internal/atomicfile"
 )
 
 type Repository struct {
@@ -46,39 +48,52 @@ func Save(path string, value State) error {
 	if value.Repositories == nil {
 		value.Repositories = make(map[string]Repository)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create state directory: %w", err)
-	}
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode state: %w", err)
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(path), "state-*.tmp")
+	return atomicfile.Write(path, data, 0o600)
+}
+
+func Update(path string, update func(*State) error) error {
+	release, err := acquire(path + ".lock")
 	if err != nil {
-		return fmt.Errorf("create temporary state: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+	defer release()
+	current, err := Load(path)
+	if err != nil {
 		return err
 	}
-	if err := tmp.Close(); err != nil {
+	if err := update(&current); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		// Windows does not replace an existing destination with os.Rename.
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			return err
+	return Save(path, current)
+}
+
+func acquire(path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
+			_ = file.Close()
+			return func() { _ = os.Remove(path) }, nil
 		}
-		if err := os.Rename(tmpPath, path); err != nil {
-			return fmt.Errorf("replace state %s: %w", path, err)
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("lock state: %w", err)
 		}
+		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > 10*time.Minute {
+			_ = os.Remove(path)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("state is busy; try again")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
-	return nil
 }

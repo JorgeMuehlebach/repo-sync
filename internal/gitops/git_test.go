@@ -12,10 +12,11 @@ import (
 )
 
 type fakeRunner struct {
-	root     string
-	dirty    bool
-	pushFail int
-	calls    []string
+	root       string
+	dirty      bool
+	pushFail   int
+	rebaseFail bool
+	calls      []string
 }
 
 func (f *fakeRunner) Run(_ context.Context, _ string, args ...string) Result {
@@ -44,8 +45,43 @@ func (f *fakeRunner) Run(_ context.Context, _ string, args ...string) Result {
 			return Result{ExitCode: 1, Err: errors.New("rejected"), Output: "non-fast-forward"}
 		}
 		return Result{}
+	case "rebase origin/main":
+		if f.rebaseFail {
+			return Result{ExitCode: 1, Err: errors.New("conflict"), Output: "CONFLICT"}
+		}
+		return Result{}
 	default:
 		return Result{}
+	}
+}
+
+func TestSyncAbortsConflictingRebase(t *testing.T) {
+	root := filepath.Clean(t.TempDir())
+	runner := &fakeRunner{root: root, rebaseFail: true}
+	syncer := Syncer{Git: runner}
+	spec := discovery.RepositorySpec{Key: "owner/repo", Branch: "main"}
+	err := syncer.Sync(context.Background(), root, spec)
+	if err == nil || !strings.Contains(err.Error(), "rebase") {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	seenAbort := false
+	for _, call := range runner.calls {
+		if call == "rebase --abort" {
+			seenAbort = true
+		}
+		if strings.HasPrefix(call, "push ") {
+			t.Fatalf("push occurred after a rebase conflict: %#v", runner.calls)
+		}
+	}
+	if !seenAbort {
+		t.Fatalf("rebase abort not called: %#v", runner.calls)
+	}
+}
+
+func TestCommandErrorRedactsURLCredentials(t *testing.T) {
+	err := commandError(Result{Err: errors.New("failed"), Output: "fatal: https://secret@github.com/owner/repo"}, "fetch")
+	if strings.Contains(err.Error(), "secret") || !strings.Contains(err.Error(), "https://***@github.com") {
+		t.Fatalf("redacted error = %q", err)
 	}
 }
 
