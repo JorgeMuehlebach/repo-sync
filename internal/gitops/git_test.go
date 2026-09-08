@@ -136,6 +136,25 @@ func TestSyncPausesOnDifferentBranch(t *testing.T) {
 	}
 }
 
+func TestInspectIsReadOnly(t *testing.T) {
+	root := filepath.Clean(t.TempDir())
+	runner := &fakeRunner{root: root, dirty: true}
+	inspection, err := (Syncer{Git: runner}).Inspect(context.Background(), root, discovery.RepositorySpec{Key: "owner/repo", Branch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inspection.Changes, []string{" M README.md"}) {
+		t.Fatalf("changes = %#v", inspection.Changes)
+	}
+	for _, call := range runner.calls {
+		for _, mutating := range []string{"add ", "commit ", "fetch ", "rebase ", "push "} {
+			if strings.HasPrefix(call, mutating) {
+				t.Fatalf("Inspect executed %q: %#v", call, runner.calls)
+			}
+		}
+	}
+}
+
 type branchRunner struct {
 	*fakeRunner
 	branch string

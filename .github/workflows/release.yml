@@ -4,12 +4,15 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -33,11 +36,85 @@ jobs:
             if [[ "$os" == "windows" ]]; then
               (cd "$work" && zip -q "../repo-sync_${version}_${os}_${arch}.zip" "$binary")
             else
-              tar -C "$work" -czf "dist/repo-sync_${version}_${os}_${arch}.tar.gz" "$binary"
+              (cd "$work" && tar -czf "../repo-sync_${version}_${os}_${arch}.tar.gz" "$binary")
             fi
           done
           rm -rf dist/work_*
           (cd dist && sha256sum repo-sync_* > SHA256SUMS)
+      - name: Attest release archives
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/repo-sync_*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            asset_os: linux
+            extension: tar.gz
+            binary: repo-sync
+          - runner: macos-13
+            asset_os: darwin
+            extension: tar.gz
+            binary: repo-sync
+          - runner: windows-latest
+            asset_os: windows
+            extension: zip
+            binary: repo-sync.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Verify and run archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          archive="repo-sync_${version}_${{ matrix.asset_os }}_amd64.${{ matrix.extension }}"
+          expected="$(awk -v name="$archive" '$2 == name { print $1 }' dist/SHA256SUMS)"
+          actual="$(shasum -a 256 "dist/$archive" | awk '{ print $1 }')"
+          [[ -n "$expected" && "$actual" == "$expected" ]]
+          mkdir smoke
+          tar -xzf "dist/$archive" -C smoke
+          ./smoke/${{ matrix.binary }} version
+          ./smoke/${{ matrix.binary }} help
+      - name: Verify and run archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $archive = "repo-sync_${version}_${{ matrix.asset_os }}_amd64.${{ matrix.extension }}"
+          $line = Get-Content dist/SHA256SUMS | Where-Object { $_ -match "\s$([regex]::Escape($archive))$" }
+          if (-not $line) { throw "Missing checksum for $archive" }
+          $expected = ($line -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash "dist/$archive" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Checksum mismatch for $archive" }
+          Expand-Archive "dist/$archive" -DestinationPath smoke
+          & "./smoke/${{ matrix.binary }}" version
+          & "./smoke/${{ matrix.binary }}" help
+
+  release:
+    needs: [build, smoke]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

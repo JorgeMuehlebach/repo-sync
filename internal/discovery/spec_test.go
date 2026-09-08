@@ -43,3 +43,13 @@ func TestCanonicalRemote(t *testing.T) {
 		t.Fatal("expected credential-bearing remote to be rejected")
 	}
 }
+
+func TestNewGitHubRepositorySpecPreservesSlashBranch(t *testing.T) {
+	got, err := NewGitHubRepositorySpec("Owner/Repo", "feature/sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Key != "owner/repo" || got.Branch != "feature/sync" || got.OriginalURL != "https://github.com/Owner/Repo/tree/feature/sync" {
+		t.Fatalf("NewGitHubRepositorySpec() = %#v", got)
+	}
+}

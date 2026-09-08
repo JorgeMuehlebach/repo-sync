@@ -105,6 +105,46 @@ func ValidatePath(ctx context.Context, repoPath string, spec RepositorySpec) err
 	return nil
 }
 
+func SpecFromPath(ctx context.Context, repoPath string) (RepositorySpec, string, error) {
+	root, err := gitOutput(ctx, repoPath, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return RepositorySpec{}, "", fmt.Errorf("%s is not a Git working tree", repoPath)
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return RepositorySpec{}, "", err
+	}
+	absolutePath, err := filepath.Abs(repoPath)
+	if err != nil {
+		return RepositorySpec{}, "", err
+	}
+	rootInfo, rootErr := os.Stat(absoluteRoot)
+	pathInfo, pathErr := os.Stat(absolutePath)
+	if rootErr != nil || pathErr != nil || !os.SameFile(rootInfo, pathInfo) {
+		return RepositorySpec{}, "", fmt.Errorf("%s is inside a repository; enter its root %s", repoPath, absoluteRoot)
+	}
+	remote, err := gitOutput(ctx, absoluteRoot, "config", "--get", "remote.origin.url")
+	if err != nil {
+		return RepositorySpec{}, "", fmt.Errorf("read origin remote: %w", err)
+	}
+	key, err := CanonicalRemote(remote)
+	if err != nil {
+		return RepositorySpec{}, "", fmt.Errorf("read GitHub origin: %w", err)
+	}
+	branch, err := gitOutput(ctx, absoluteRoot, "branch", "--show-current")
+	if err != nil {
+		return RepositorySpec{}, "", fmt.Errorf("read current branch: %w", err)
+	}
+	if branch == "" {
+		return RepositorySpec{}, "", fmt.Errorf("detached HEAD is not supported; check out the branch to synchronize")
+	}
+	spec, err := NewGitHubRepositorySpec(key, branch)
+	if err != nil {
+		return RepositorySpec{}, "", err
+	}
+	return spec, absoluteRoot, nil
+}
+
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
