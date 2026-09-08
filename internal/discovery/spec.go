@@ -20,6 +20,26 @@ func (s RepositorySpec) StateKey() string {
 	return s.Key + "#" + s.Branch
 }
 
+func NewGitHubRepositorySpec(key, branch string) (RepositorySpec, error) {
+	parts := strings.Split(strings.TrimSpace(key), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.TrimSpace(branch) == "" {
+		return RepositorySpec{}, fmt.Errorf("repository owner, name, and branch are required")
+	}
+	escapedBranch := make([]string, 0)
+	for _, part := range strings.Split(branch, "/") {
+		if part == "" {
+			return RepositorySpec{}, fmt.Errorf("branch cannot contain an empty path segment")
+		}
+		escapedBranch = append(escapedBranch, url.PathEscape(part))
+	}
+	return ParseGitHubBranchURL(fmt.Sprintf(
+		"https://github.com/%s/%s/tree/%s",
+		url.PathEscape(parts[0]),
+		url.PathEscape(strings.TrimSuffix(parts[1], ".git")),
+		strings.Join(escapedBranch, "/"),
+	))
+}
+
 func ParseGitHubBranchURL(raw string) (RepositorySpec, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {

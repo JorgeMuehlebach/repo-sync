@@ -49,8 +49,74 @@ type Syncer struct {
 	CommitMessage string
 }
 
+type Inspection struct {
+	Changes []string
+}
+
 func NewSyncer() Syncer {
 	return Syncer{Git: SystemRunner{}, CommitMessage: defaultCommitMessage}
+}
+
+func (s Syncer) Inspect(ctx context.Context, repoPath string, spec discovery.RepositorySpec) (Inspection, error) {
+	if s.Git == nil {
+		s.Git = SystemRunner{}
+	}
+	if err := s.validate(ctx, repoPath, spec); err != nil {
+		return Inspection{}, err
+	}
+	if err := s.ensureNoOperationInProgress(ctx, repoPath); err != nil {
+		return Inspection{}, err
+	}
+	status := s.Git.Run(ctx, repoPath, "status", "--porcelain=v1")
+	if status.Err != nil {
+		return Inspection{}, commandError(status, "read working-tree status")
+	}
+	inspection := Inspection{}
+	if status.Output != "" {
+		inspection.Changes = strings.Split(status.Output, "\n")
+	}
+	return inspection, nil
+}
+
+func (s Syncer) CheckIdentity(ctx context.Context, repoPath string) error {
+	if s.Git == nil {
+		s.Git = SystemRunner{}
+	}
+	for _, field := range []string{"user.name", "user.email"} {
+		result := s.Git.Run(ctx, repoPath, "config", "--get", field)
+		if result.Err != nil || strings.TrimSpace(result.Output) == "" {
+			return fmt.Errorf("Git %s is not configured", field)
+		}
+	}
+	return nil
+}
+
+func (s Syncer) CheckRemote(ctx context.Context, repoPath string, spec discovery.RepositorySpec) error {
+	if s.Git == nil {
+		s.Git = SystemRunner{}
+	}
+	result := s.Git.Run(ctx, repoPath, "ls-remote", "--exit-code", "--heads", "origin", "refs/heads/"+spec.Branch)
+	if result.Err != nil {
+		return commandError(result, "reach origin branch")
+	}
+	return nil
+}
+
+func (s Syncer) Ignored(ctx context.Context, repoPath string) ([]string, error) {
+	if s.Git == nil {
+		s.Git = SystemRunner{}
+	}
+	result := s.Git.Run(ctx, repoPath, "status", "--porcelain=v1", "--ignored=matching")
+	if result.Err != nil {
+		return nil, commandError(result, "inspect ignored paths")
+	}
+	var ignored []string
+	for _, line := range strings.Split(result.Output, "\n") {
+		if strings.HasPrefix(line, "!! ") {
+			ignored = append(ignored, strings.TrimSpace(strings.TrimPrefix(line, "!! ")))
+		}
+	}
+	return ignored, nil
 }
 
 func (s Syncer) Sync(ctx context.Context, repoPath string, spec discovery.RepositorySpec) error {
@@ -60,18 +126,11 @@ func (s Syncer) Sync(ctx context.Context, repoPath string, spec discovery.Reposi
 	if s.CommitMessage == "" {
 		s.CommitMessage = defaultCommitMessage
 	}
-	if err := s.validate(ctx, repoPath, spec); err != nil {
+	inspection, err := s.Inspect(ctx, repoPath, spec)
+	if err != nil {
 		return err
 	}
-	if err := s.ensureNoOperationInProgress(ctx, repoPath); err != nil {
-		return err
-	}
-
-	status := s.Git.Run(ctx, repoPath, "status", "--porcelain=v1")
-	if status.Err != nil {
-		return commandError(status, "read working-tree status")
-	}
-	if status.Output != "" {
+	if len(inspection.Changes) > 0 {
 		if result := s.Git.Run(ctx, repoPath, "add", "-A"); result.Err != nil {
 			return commandError(result, "stage changes")
 		}
