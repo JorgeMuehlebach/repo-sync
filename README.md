@@ -20,7 +20,9 @@ The portable YAML configuration is stored in the operating system's user configu
 
 - macOS: `~/Library/Application Support/repo-sync/config.yaml`
 - Linux: `${XDG_CONFIG_HOME:-~/.config}/repo-sync/config.yaml`
-- Windows: `%AppData%\repo-sync\config.yaml`
+- Windows: `%UserProfile%\.config\repo-sync\config.yaml`
+
+On Windows, Repo Sync copies an existing `config.yaml` and `state.json` from `%AppData%\repo-sync` the first time the stable location is used. Existing files in the stable location always win, and the legacy files are left untouched. This avoids the different AppData paths seen by packaged applications and Task Scheduler.
 
 Resolved checkout paths and runtime status are stored separately in `state.json`, allowing the same repository list to be used on computers with different directory layouts.
 
@@ -38,6 +40,17 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/JorgeMuehlebach/repo-sync/main/scripts/install.ps1 | iex
 ```
 
+The installers verify release checksums and the staged binary, add the install directory to the user's PATH, and preserve a running service across upgrades. If validation or restart fails, the previous executable is restored. Pin a version with `REPO_SYNC_VERSION` or opt out of PATH changes with `REPO_SYNC_NO_PATH=1`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/JorgeMuehlebach/repo-sync/main/scripts/install.sh | REPO_SYNC_VERSION=0.2.0 sh
+```
+
+```powershell
+$env:REPO_SYNC_VERSION = "0.2.0"
+irm https://raw.githubusercontent.com/JorgeMuehlebach/repo-sync/main/scripts/install.ps1 | iex
+```
+
 You can also download a binary from [GitHub Releases](https://github.com/JorgeMuehlebach/repo-sync/releases) or build it with Go 1.23 or newer:
 
 ```sh
@@ -46,24 +59,32 @@ go build -o repo-sync ./cmd/repo-sync
 
 ## Set up
 
-Add one or more branch URLs, discover or clone them, and start the service:
+Bootstrap an existing checkout directly, without scanning the home directory:
 
 ```sh
-repo-sync config add https://github.com/owner/docs/tree/main
-repo-sync setup
-repo-sync start
+repo-sync bootstrap /path/to/docs --start
 ```
 
-Setup searches the user's home directory and optional `search_roots`. Hidden, system, dependency, and common build directories are skipped. When multiple clones match, setup asks which one to use. When none match, it asks for an existing path or a destination to clone.
+You can also bootstrap a branch URL. Repo Sync adopts an already recorded checkout or clones it to `~/repo-name`:
+
+```sh
+repo-sync bootstrap https://github.com/owner/docs/tree/main --start
+```
+
+For several preconfigured repositories, the original `config add` plus `setup` workflow remains available. Setup searches the user's home directory and optional `search_roots`; bootstrap never does. Hidden, system, dependency, and common build directories are skipped.
 
 ## Commands
 
 ```text
+repo-sync bootstrap <path|branch-url>    Configure one checkout without a home scan
+  --start                                Enable synchronization after bootstrap
 repo-sync setup                         Discover or clone configured repositories
 repo-sync start                         Install, enable, and start the user service
 repo-sync stop                          Stop and disable synchronization
 repo-sync status                        Show service and repository status
 repo-sync sync                          Run one synchronization immediately
+repo-sync sync --dry-run                Validate and show the planned Git actions
+repo-sync doctor                        Check Git, config, checkouts, remotes, and service
 repo-sync uninstall                     Remove the service but preserve configuration
 repo-sync config add <branch-url>       Add a repository branch
 repo-sync config remove <branch-url>    Remove a repository branch
@@ -72,6 +93,8 @@ repo-sync version                       Print the installed version
 ```
 
 The background integration uses LaunchAgents on macOS, systemd user services on Linux, and a current-user Task Scheduler entry on Windows.
+
+`sync --dry-run` does not acquire locks, write state or logs, or run `git add`, `commit`, `fetch`, `rebase`, or `push`. `doctor` is also read-only; its remote check uses `git ls-remote` and therefore requires network access.
 
 ## Synchronization behavior
 
@@ -86,11 +109,21 @@ For each configured checkout, Repo Sync:
 
 Repo Sync never force-pushes, hard-resets, switches branches, or bypasses Git hooks. A failed rebase is aborted and reported by `repo-sync status`; the local commit remains intact.
 
+## Releases and package managers
+
+Release archives are checksum-verified and smoke-tested on native Windows, macOS, and Linux AMD64 runners before publication. GitHub build provenance can be verified with:
+
+```sh
+gh attestation verify --owner JorgeMuehlebach repo-sync_VERSION_OS_ARCH.EXT
+```
+
+Homebrew, Scoop, and Winget publication is intentionally handled after a release exists, because their manifests require the immutable release URLs and final SHA-256 values. The direct installers remain the supported installation path until those external tap, bucket, and `winget-pkgs` submissions are published.
+
 ## Roadmap
 
 - Guided conflict recovery and optional automatic conflict policies.
 - Native desktop notifications.
-- Homebrew, Scoop, and additional package-manager distribution.
+- Published Homebrew, Scoop, and Winget packages.
 - Configurable per-repository intervals and staging policies.
 - Support for Git hosts other than GitHub.
 
