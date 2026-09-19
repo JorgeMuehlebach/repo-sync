@@ -28,6 +28,12 @@ func TestWindowsMirrorPointerAtomicReplacementRuntime(t *testing.T) {
 	if err := backend.Create(pointer, first); err != nil {
 		t.Fatalf("create junction: %v", err)
 	}
+	if !IsMirrorPointer(pointer) {
+		t.Fatal("created Windows junction was not recognized as a stable mirror pointer")
+	}
+	if IsMirrorPointer(first) {
+		t.Fatal("ordinary Windows directory was recognized as a stable mirror pointer")
+	}
 	before, beforeErr := windowsMirrorPointerInfo(pointer)
 	if err := backend.Replace(pointer, first, second); err != nil {
 		resolved, resolveErr := backend.Resolve(pointer)
