@@ -4,12 +4,16 @@ package background
 
 import (
 	"errors"
+	"os"
+	"os/signal"
+	"syscall"
 
 	kservice "github.com/kardianos/service"
 )
 
 type controller struct {
 	service kservice.Service
+	program Program
 }
 
 type serviceAdapter struct {
@@ -34,7 +38,7 @@ func New(program Program, cfg Config) (Controller, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &controller{service: service}, nil
+	return &controller{service: service, program: program}, nil
 }
 
 func (a serviceAdapter) Start(_ kservice.Service) error { return a.program.Start() }
@@ -44,7 +48,19 @@ func (c *controller) Install() error   { return mapError(c.service.Install()) }
 func (c *controller) Uninstall() error { return mapError(c.service.Uninstall()) }
 func (c *controller) Start() error     { return mapError(c.service.Start()) }
 func (c *controller) Stop() error      { return mapError(c.service.Stop()) }
-func (c *controller) Run() error       { return mapError(c.service.Run()) }
+func (c *controller) Run() error {
+	if err := c.program.Start(); err != nil {
+		return err
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	select {
+	case <-signals:
+	case <-c.program.Done():
+	}
+	return c.program.Stop()
+}
 
 func (c *controller) Status() (Status, error) {
 	status, err := c.service.Status()

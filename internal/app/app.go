@@ -2506,6 +2506,11 @@ func (a *Application) enableService() error {
 	if err != nil {
 		return a.startFailure(err)
 	}
+	machineState, err := state.Load(a.statePath)
+	if err != nil {
+		return a.startFailure(err)
+	}
+	wasEnabled := machineState.Enabled
 	status, statusErr := service.Status()
 	if errors.Is(statusErr, background.ErrNotInstalled) {
 		if err := service.Install(); err != nil {
@@ -2514,6 +2519,15 @@ func (a *Application) enableService() error {
 		status = background.StatusStopped
 	} else if statusErr != nil {
 		return a.startFailure(fmt.Errorf("inspect service: %w", statusErr))
+	}
+	// A rapid stop/start can observe the old service wrapper as running after
+	// its worker has already consumed the disabled state and exited. Restart
+	// that lingering process instead of treating it as a healthy service.
+	if status == background.StatusRunning && !wasEnabled {
+		if err := service.Stop(); err != nil {
+			return a.startFailure(fmt.Errorf("stop disabled service: %w", err))
+		}
+		status = background.StatusStopped
 	}
 	if err := state.Update(a.statePath, func(current *state.State) error {
 		current.Enabled = true
