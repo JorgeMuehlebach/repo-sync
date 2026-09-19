@@ -30,8 +30,10 @@ type fakeService struct {
 	statusErr    error
 	installErr   error
 	startErr     error
+	stopErr      error
 	installCalls int
 	startCalls   int
+	stopCalls    int
 }
 
 func (f *fakeService) Install() error {
@@ -46,8 +48,11 @@ func (f *fakeService) Start() error {
 	return f.startErr
 }
 
-func (f *fakeService) Stop() error { return nil }
-func (f *fakeService) Run() error  { return nil }
+func (f *fakeService) Stop() error {
+	f.stopCalls++
+	return f.stopErr
+}
+func (f *fakeService) Run() error { return nil }
 func (f *fakeService) Status() (background.Status, error) {
 	return f.status, f.statusErr
 }
@@ -1399,6 +1404,52 @@ func TestEnableServiceEnablesAfterServiceIsReady(t *testing.T) {
 		t.Fatalf("Start() calls = %d, want 1", service.startCalls)
 	}
 	assertEnabled(t, application.statePath, true)
+}
+
+func TestEnableServiceRestartsLingeringDisabledService(t *testing.T) {
+	service := &fakeService{status: background.StatusRunning}
+	application := serviceTestApplication(t, service)
+	if err := application.enableService(); err != nil {
+		t.Fatal(err)
+	}
+	if service.stopCalls != 1 || service.startCalls != 1 {
+		t.Fatalf("Stop()/Start() calls = %d/%d, want 1/1", service.stopCalls, service.startCalls)
+	}
+	assertEnabled(t, application.statePath, true)
+}
+
+func TestEnableServiceLeavesDisabledWhenLingeringServiceCannotStop(t *testing.T) {
+	service := &fakeService{status: background.StatusRunning, stopErr: errors.New("still stopping")}
+	application := serviceTestApplication(t, service)
+	err := application.enableService()
+	if err == nil || !strings.Contains(err.Error(), "stop disabled service: still stopping") {
+		t.Fatalf("enableService() error = %v", err)
+	}
+	if service.startCalls != 0 {
+		t.Fatalf("Start() calls = %d, want 0", service.startCalls)
+	}
+	assertEnabled(t, application.statePath, false)
+}
+
+func TestStopUnregistersInstalledServiceThatIsAlreadyStopped(t *testing.T) {
+	service := &fakeService{status: background.StatusStopped}
+	application := serviceTestApplication(t, service)
+	if err := config.Save(application.configPath, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Update(application.statePath, func(current *state.State) error {
+		current.Enabled = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if service.stopCalls != 1 {
+		t.Fatalf("Stop() calls = %d, want 1", service.stopCalls)
+	}
+	assertEnabled(t, application.statePath, false)
 }
 
 func serviceTestApplication(t *testing.T, service background.Controller) *Application {
