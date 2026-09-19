@@ -27,6 +27,13 @@ func IsMirrorPointer(path string) bool {
 	return isMirrorPointer(path)
 }
 
+// ResolveMirrorPointer resolves one platform-supported stable mirror pointer
+// without relying on filepath.EvalSymlinks, which does not resolve every
+// Windows directory junction representation.
+func ResolveMirrorPointer(path string) (string, error) {
+	return (systemMirrorPointerBackend{}).Resolve(path)
+}
+
 // MirrorSyncResult returns the promotion transaction identity in the same call
 // as the promoted outcome. The application must use TransactionID when it
 // finalizes or rolls back after persisting and reopening accepted status.
