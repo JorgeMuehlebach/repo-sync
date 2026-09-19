@@ -2564,7 +2564,7 @@ func (a *Application) stop() error {
 	if err != nil {
 		return err
 	}
-	status, statusErr := service.Status()
+	_, statusErr := service.Status()
 	if errors.Is(statusErr, background.ErrNotInstalled) {
 		if _, err := a.refreshContextStatus("unavailable"); err != nil {
 			return fmt.Errorf("refresh context status: %w", err)
@@ -2575,10 +2575,8 @@ func (a *Application) stop() error {
 	if statusErr != nil {
 		return statusErr
 	}
-	if status == background.StatusRunning {
-		if err := service.Stop(); err != nil {
-			return fmt.Errorf("stop service: %w", err)
-		}
+	if err := service.Stop(); err != nil {
+		return fmt.Errorf("stop service: %w", err)
 	}
 	if _, err := a.refreshContextStatus("stopped"); err != nil {
 		return fmt.Errorf("refresh context status: %w", err)

@@ -1431,6 +1431,27 @@ func TestEnableServiceLeavesDisabledWhenLingeringServiceCannotStop(t *testing.T)
 	assertEnabled(t, application.statePath, false)
 }
 
+func TestStopUnregistersInstalledServiceThatIsAlreadyStopped(t *testing.T) {
+	service := &fakeService{status: background.StatusStopped}
+	application := serviceTestApplication(t, service)
+	if err := config.Save(application.configPath, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Update(application.statePath, func(current *state.State) error {
+		current.Enabled = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := application.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if service.stopCalls != 1 {
+		t.Fatalf("Stop() calls = %d, want 1", service.stopCalls)
+	}
+	assertEnabled(t, application.statePath, false)
+}
+
 func serviceTestApplication(t *testing.T, service background.Controller) *Application {
 	t.Helper()
 	application, _ := testApplication(t)
