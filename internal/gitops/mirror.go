@@ -20,6 +20,13 @@ func NewMirror(runner Runner, validator validation.Validator) Mirror {
 	return Mirror{base: newBase(runner, validator), pointers: systemMirrorPointerBackend{}}
 }
 
+// IsMirrorPointer reports whether path is a platform-supported stable mirror
+// pointer. On Windows this deliberately recognizes directory junctions as
+// well as symbolic links; os.FileMode alone does not identify junctions.
+func IsMirrorPointer(path string) bool {
+	return isMirrorPointer(path)
+}
+
 // MirrorSyncResult returns the promotion transaction identity in the same call
 // as the promoted outcome. The application must use TransactionID when it
 // finalizes or rolls back after persisting and reopening accepted status.
