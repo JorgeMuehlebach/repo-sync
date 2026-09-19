@@ -77,7 +77,7 @@ func VerifyDirectoryNoReparse(path string) (os.FileInfo, error) {
 	info, err := file.Stat()
 	resolved, resolveErr := finalPathByHandle(handle)
 	_ = file.Close()
-	if err != nil || resolveErr != nil || !strings.EqualFold(filepath.Clean(resolved), absolute) || !info.IsDir() {
+	if err != nil || resolveErr != nil || !sameWindowsFinalPath(resolved, absolute) || !info.IsDir() {
 		return nil, fmt.Errorf("path is not a safe directory")
 	}
 	if err := verifyWindowsAncestors(root, components[:len(components)-1]); err != nil {
@@ -107,7 +107,7 @@ func OpenRegularBeneath(root, relative string) (*os.File, error) {
 		return nil, err
 	}
 	resolved, err := finalPathByHandle(windows.Handle(file.Fd()))
-	if err != nil || !strings.EqualFold(filepath.Clean(resolved), filepath.Clean(expected)) {
+	if err != nil || !sameWindowsFinalPath(resolved, expected) {
 		_ = file.Close()
 		return nil, fmt.Errorf("opened file escaped its repository root")
 	}
@@ -186,10 +186,41 @@ func finalPathByHandle(handle windows.Handle) (string, error) {
 		return "", fmt.Errorf("resolve opened file handle")
 	}
 	value := windows.UTF16ToString(buffer[:length])
-	if strings.HasPrefix(value, `\\?\UNC\`) {
-		value = `\\` + strings.TrimPrefix(value, `\\?\UNC\`)
-	} else {
-		value = strings.TrimPrefix(value, `\\?\`)
+	return normalizeWindowsPathPrefix(value), nil
+}
+
+// GetFinalPathNameByHandle returns a normalized long path, while callers may
+// legitimately use an absolute 8.3 spelling inherited from TEMP or another
+// operating-system setting. Expand only the lexical short-name spelling before
+// comparing; unlike EvalSymlinks this does not make a reparse point acceptable.
+func sameWindowsFinalPath(resolved, expected string) bool {
+	longExpected, err := longWindowsPath(expected)
+	if err != nil {
+		return false
 	}
-	return value, nil
+	return strings.EqualFold(filepath.Clean(resolved), filepath.Clean(longExpected))
+}
+
+func longWindowsPath(path string) (string, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", err
+	}
+	buffer := make([]uint16, 32768)
+	length, err := windows.GetLongPathName(name, &buffer[0], uint32(len(buffer)))
+	if err != nil || length == 0 || int(length) >= len(buffer) {
+		return "", fmt.Errorf("expand canonical Windows path")
+	}
+	return normalizeWindowsPathPrefix(windows.UTF16ToString(buffer[:length])), nil
+}
+
+func normalizeWindowsPathPrefix(value string) string {
+	if strings.HasPrefix(value, `\\?\UNC\`) {
+		return `\\` + strings.TrimPrefix(value, `\\?\UNC\`)
+	}
+	if strings.HasPrefix(value, `\??\UNC\`) {
+		return `\\` + strings.TrimPrefix(value, `\??\UNC\`)
+	}
+	value = strings.TrimPrefix(value, `\\?\`)
+	return strings.TrimPrefix(value, `\??\`)
 }

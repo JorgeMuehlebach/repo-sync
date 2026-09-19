@@ -35,6 +35,7 @@ func (systemMirrorPointerBackend) Resolve(exposed string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	target = normalizeWindowsJunctionTarget(target)
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(filepath.Dir(exposed), target)
 	}
@@ -222,6 +223,17 @@ func createWindowsJunction(link, target string) error {
 	}
 	cleanup = false
 	return nil
+}
+
+func normalizeWindowsJunctionTarget(target string) string {
+	if strings.HasPrefix(target, `\\?\UNC\`) {
+		return `\\` + strings.TrimPrefix(target, `\\?\UNC\`)
+	}
+	if strings.HasPrefix(target, `\??\UNC\`) {
+		return `\\` + strings.TrimPrefix(target, `\??\UNC\`)
+	}
+	target = strings.TrimPrefix(target, `\\?\`)
+	return strings.TrimPrefix(target, `\??\`)
 }
 
 func requireCanonicalMirrorPointerPath(path string) error {

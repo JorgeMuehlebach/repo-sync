@@ -5,8 +5,6 @@ package securefile
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"golang.org/x/sys/windows"
 )
@@ -44,7 +42,7 @@ func OpenCanonicalRegularRetained(path string) (*os.File, error) {
 		return nil, fmt.Errorf("path is not a regular file")
 	}
 	resolved, err := finalPathByHandle(handle)
-	if err != nil || !strings.EqualFold(filepath.Clean(resolved), absolute) {
+	if err != nil || !sameWindowsFinalPath(resolved, absolute) {
 		_ = windows.CloseHandle(handle)
 		return nil, fmt.Errorf("opened file changed identity")
 	}

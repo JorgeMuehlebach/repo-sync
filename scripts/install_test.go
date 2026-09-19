@@ -84,6 +84,9 @@ func TestPOSIXInstallerStopsAndWaitsBeforeReplacement(t *testing.T) {
 	if err := os.MkdirAll(installDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	newBinary := filepath.Join(root, "new-repo-sync")
 	writeExecutable(t, newBinary, `#!/bin/sh
 case "${1:-}" in
