@@ -351,6 +351,12 @@ func (p Publisher) captureCandidateTree(ctx context.Context, repoPath string) (s
 		_ = os.RemoveAll(temporaryRoot)
 		return "", candidateIndex{}, internalFailure("candidate")
 	}
+	canonicalTemporaryRoot, err := filepath.EvalSymlinks(temporaryRoot)
+	if err != nil {
+		_ = os.RemoveAll(temporaryRoot)
+		return "", candidateIndex{}, internalFailure("candidate")
+	}
+	temporaryRoot = filepath.Clean(canonicalTemporaryRoot)
 	validationRepository := filepath.Join(temporaryRoot, "repository.git")
 	temporaryObjects := filepath.Join(validationRepository, "objects")
 	if err := initializeTemporaryRepository(validationRepository, temporaryObjects, realObjects, objectFormat.Output); err != nil {
