@@ -516,14 +516,29 @@ func rejectExecutableGitConfig(ctx context.Context, runner Runner, directory, ph
 }
 
 func rejectRepositoryCredentialHelpers(ctx context.Context, runner Runner, directory, phase string) *OperationError {
-	for _, scope := range []string{"--local", "--worktree"} {
-		result := runner.Run(ctx, directory, "config", scope, "--get-regexp", `^credential(\..+)?\.helper$`)
-		if result.Err == nil {
-			return &OperationError{Code: "REPO-GIT-EXECUTABLE-CONFIG", Phase: phase, Summary: "repository-local credential helpers are not supported"}
+	local := runner.Run(ctx, directory, "config", "--local", "--get-regexp", `^credential(\..+)?\.helper$`)
+	if local.Err == nil {
+		return &OperationError{Code: "REPO-GIT-EXECUTABLE-CONFIG", Phase: phase, Summary: "repository-local credential helpers are not supported"}
+	}
+	if local.ExitCode != 1 {
+		return commandFailure("REPO-GIT-CONFIG", phase, "Git credential configuration could not be inspected", local)
+	}
+	worktreeConfig := runner.Run(ctx, directory, "config", "--local", "--bool", "extensions.worktreeConfig")
+	if worktreeConfig.Err != nil {
+		if worktreeConfig.ExitCode == 1 {
+			return nil
 		}
-		if result.ExitCode != 1 {
-			return commandFailure("REPO-GIT-CONFIG", phase, "Git credential configuration could not be inspected", result)
-		}
+		return commandFailure("REPO-GIT-CONFIG", phase, "Git credential configuration could not be inspected", worktreeConfig)
+	}
+	if !strings.EqualFold(strings.TrimSpace(worktreeConfig.Output), "true") {
+		return nil
+	}
+	worktree := runner.Run(ctx, directory, "config", "--worktree", "--get-regexp", `^credential(\..+)?\.helper$`)
+	if worktree.Err == nil {
+		return &OperationError{Code: "REPO-GIT-EXECUTABLE-CONFIG", Phase: phase, Summary: "repository-local credential helpers are not supported"}
+	}
+	if worktree.ExitCode != 1 {
+		return commandFailure("REPO-GIT-CONFIG", phase, "Git credential configuration could not be inspected", worktree)
 	}
 	return nil
 }
