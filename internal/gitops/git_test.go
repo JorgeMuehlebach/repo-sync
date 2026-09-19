@@ -2,168 +2,134 @@ package gitops
 
 import (
 	"context"
-	"errors"
+	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/JorgeMuehlebach/repo-sync/internal/discovery"
+	"github.com/JorgeMuehlebach/repo-sync/internal/validation"
 )
 
-type fakeRunner struct {
-	root       string
-	dirty      bool
-	pushFail   int
-	rebaseFail bool
-	calls      []string
-}
-
-func (f *fakeRunner) Run(_ context.Context, _ string, args ...string) Result {
-	call := strings.Join(args, " ")
-	f.calls = append(f.calls, call)
-	if strings.HasPrefix(call, "rev-parse --git-path ") {
-		return Result{Output: filepath.Join(f.root, ".git", args[len(args)-1])}
+func TestSafeCandidatePathRejectsControlAndTraversalNames(t *testing.T) {
+	for _, value := range []string{"docs/readme.md", "skills/tool/SKILL.md", "space is fine.md"} {
+		if !safeCandidatePath(value) {
+			t.Fatalf("safeCandidatePath(%q) = false", value)
+		}
 	}
-	switch call {
-	case "rev-parse --show-toplevel":
-		return Result{Output: f.root}
-	case "config --get remote.origin.url":
-		return Result{Output: "git@github.com:owner/repo.git"}
-	case "branch --show-current":
-		return Result{Output: "main"}
-	case "status --porcelain=v1":
-		if f.dirty {
-			return Result{Output: " M README.md"}
+	for _, value := range []string{"", "/absolute", "../escape", "a/../b", "a//b", "a\\b", "line\nbreak", "tab\tname", string([]byte{'b', 'a', 'd', 0xff})} {
+		if safeCandidatePath(value) {
+			t.Fatalf("safeCandidatePath(%q) = true", value)
 		}
-		return Result{}
-	case "diff --cached --quiet":
-		return Result{ExitCode: 1, Err: errors.New("exit status 1")}
-	case "push origin HEAD:main":
-		if f.pushFail > 0 {
-			f.pushFail--
-			return Result{ExitCode: 1, Err: errors.New("rejected"), Output: "non-fast-forward"}
-		}
-		return Result{}
-	case "rebase origin/main":
-		if f.rebaseFail {
-			return Result{ExitCode: 1, Err: errors.New("conflict"), Output: "CONFLICT"}
-		}
-		return Result{}
-	default:
-		return Result{}
 	}
 }
 
-func TestSyncAbortsConflictingRebase(t *testing.T) {
-	root := filepath.Clean(t.TempDir())
-	runner := &fakeRunner{root: root, rebaseFail: true}
-	syncer := Syncer{Git: runner}
-	spec := discovery.RepositorySpec{Key: "owner/repo", Branch: "main"}
-	err := syncer.Sync(context.Background(), root, spec)
-	if err == nil || !strings.Contains(err.Error(), "rebase") {
-		t.Fatalf("Sync() error = %v", err)
-	}
-	seenAbort := false
-	for _, call := range runner.calls {
-		if call == "rebase --abort" {
-			seenAbort = true
-		}
-		if strings.HasPrefix(call, "push ") {
-			t.Fatalf("push occurred after a rebase conflict: %#v", runner.calls)
-		}
-	}
-	if !seenAbort {
-		t.Fatalf("rebase abort not called: %#v", runner.calls)
-	}
-}
-
-func TestCommandErrorRedactsURLCredentials(t *testing.T) {
-	err := commandError(Result{Err: errors.New("failed"), Output: "fatal: https://secret@github.com/owner/repo"}, "fetch")
-	if strings.Contains(err.Error(), "secret") || !strings.Contains(err.Error(), "https://***@github.com") {
-		t.Fatalf("redacted error = %q", err)
-	}
-}
-
-func TestSyncCommitsRebasesAndPushes(t *testing.T) {
-	root := filepath.Clean(t.TempDir())
-	runner := &fakeRunner{root: root, dirty: true}
-	syncer := Syncer{Git: runner}
-	spec := discovery.RepositorySpec{Key: "owner/repo", Branch: "main"}
-	if err := syncer.Sync(context.Background(), root, spec); err != nil {
+func TestReadStableCandidateFileRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	link := filepath.Join(dir, "link")
+	if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	wantTail := []string{
-		"status --porcelain=v1",
-		"add -A",
-		"diff --cached --quiet",
-		"commit -m chore: automatic repository sync",
-		"fetch origin main",
-		"rebase origin/main",
-		"push origin HEAD:main",
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if len(runner.calls) < len(wantTail) || !reflect.DeepEqual(runner.calls[len(runner.calls)-len(wantTail):], wantTail) {
-		t.Fatalf("calls = %#v; want tail %#v", runner.calls, wantTail)
+	if _, _, err := readStableCandidateFile(dir, "link"); err == nil {
+		t.Fatal("symlink was opened as a regular candidate file")
 	}
 }
 
-func TestSyncRetriesRejectedPush(t *testing.T) {
-	root := filepath.Clean(t.TempDir())
-	runner := &fakeRunner{root: root, pushFail: 1}
-	syncer := Syncer{Git: runner}
-	spec := discovery.RepositorySpec{Key: "owner/repo", Branch: "main"}
-	if err := syncer.Sync(context.Background(), root, spec); err != nil {
+func TestReadStableCandidateFileRejectsRegularFileSwappedToSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "candidate")
+	outside := filepath.Join(dir, "outside")
+	if err := os.WriteFile(path, []byte("candidate"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	pushes := 0
-	for _, call := range runner.calls {
-		if call == "push origin HEAD:main" {
-			pushes++
-		}
-	}
-	if pushes != 2 {
-		t.Fatalf("push attempts = %d, want 2", pushes)
-	}
-}
-
-func TestSyncPausesOnDifferentBranch(t *testing.T) {
-	root := filepath.Clean(t.TempDir())
-	runner := &fakeRunner{root: root}
-	syncer := Syncer{Git: branchRunner{fakeRunner: runner, branch: "feature"}}
-	spec := discovery.RepositorySpec{Key: "owner/repo", Branch: "main"}
-	if err := syncer.Sync(context.Background(), root, spec); err == nil || !strings.Contains(err.Error(), "paused") {
-		t.Fatalf("Sync() error = %v, want paused error", err)
-	}
-}
-
-func TestInspectIsReadOnly(t *testing.T) {
-	root := filepath.Clean(t.TempDir())
-	runner := &fakeRunner{root: root, dirty: true}
-	inspection, err := (Syncer{Git: runner}).Inspect(context.Background(), root, discovery.RepositorySpec{Key: "owner/repo", Branch: "main"})
-	if err != nil {
+	if err := os.WriteFile(outside, []byte("outside secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(inspection.Changes, []string{" M README.md"}) {
-		t.Fatalf("changes = %#v", inspection.Changes)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
 	}
-	for _, call := range runner.calls {
-		for _, mutating := range []string{"add ", "commit ", "fetch ", "rebase ", "push "} {
-			if strings.HasPrefix(call, mutating) {
-				t.Fatalf("Inspect executed %q: %#v", call, runner.calls)
-			}
+	if err := os.Symlink(outside, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, _, err := readStableCandidateFile(dir, "candidate"); err == nil {
+		t.Fatal("file-to-symlink race was accepted")
+	}
+}
+
+func TestReadStableCandidateFileRejectsSymlinkedParent(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "nested")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	if _, _, err := readStableCandidateFile(root, "nested/secret"); err == nil {
+		t.Fatal("candidate read escaped through a symlinked parent")
+	}
+}
+
+func TestReadStableIndexRejectsSymlink(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "real-index")
+	link := filepath.Join(directory, "index")
+	if err := os.WriteFile(target, []byte("index"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, _, _, err := readStableIndex(link); err == nil {
+		t.Fatal("symlinked Git index was accepted")
+	}
+}
+
+func TestExecutableAttributeKindRejectsFiltersAndMergeDrivers(t *testing.T) {
+	for _, value := range []string{"*.md filter=evil", "*.md filter", "*.md -filter", "*.md !filter", "[attr]macro filter=evil"} {
+		if got := executableAttributeKind(value + "\n"); got != "filter" {
+			t.Fatalf("filter attribute %q was accepted", value)
 		}
 	}
-}
-
-type branchRunner struct {
-	*fakeRunner
-	branch string
-}
-
-func (r branchRunner) Run(ctx context.Context, dir string, args ...string) Result {
-	if strings.Join(args, " ") == "branch --show-current" {
-		r.calls = append(r.calls, "branch --show-current")
-		return Result{Output: r.branch}
+	for _, value := range []string{"*.md merge=evil", "*.md merge", "*.md -merge", "*.md !merge"} {
+		if got := executableAttributeKind(value + "\n"); got != "merge" {
+			t.Fatalf("merge attribute %q was accepted", value)
+		}
 	}
-	return r.fakeRunner.Run(ctx, dir, args...)
+	if got := executableAttributeKind("# *.md filter=evil\n*.md text eol=lf\n"); got != "" {
+		t.Fatal("benign/commented attributes were rejected")
+	}
+}
+
+func TestValidationHoldPreservesStableCheckCode(t *testing.T) {
+	tree := strings.Repeat("a", 40)
+	validator := validatorFunc(func(_ context.Context, request validation.Request) (validation.Report, error) {
+		return validation.Report{
+			SchemaVersion: validation.ReportSchemaVersion, Protocol: validation.ReportProtocol, ContractVersion: "2.0.0", Command: "validate",
+			GeneratedAt: "2026-09-19T00:00:00Z", Verdict: validation.VerdictHold, Promotable: false,
+			Candidate: validation.Candidate{Kind: "git-tree", SourceID: request.Runtime.SourceID, ObjectID: request.Tree},
+			Checks:    []validation.Check{{ID: validation.CodeBundleChanged, Status: "hold", Paths: []string{".agents/validators/example"}}},
+		}, nil
+	})
+	engine := newBase(nil, validator)
+	_, failure := engine.validateTree(context.Background(), Target{ID: "repo", Path: t.TempDir(), ValidationRuntime: validation.Runtime{SourceID: "example.source"}}, validation.ModeMirror, tree, tree)
+	if failure == nil || failure.Code != validation.CodeBundleChanged || len(failure.Findings) != 1 {
+		t.Fatalf("validation failure = %#v", failure)
+	}
+}
+
+func TestCommandFailureNeverIncludesRawGitOutput(t *testing.T) {
+	failure := commandFailure("REPO-FETCH-FAILED", "fetch", "fetch failed", Result{ExitCode: 1, Output: "https://secret@example.invalid"})
+	if strings.Contains(failure.Error(), "secret") || !strings.Contains(failure.Error(), "Git exit 1") {
+		t.Fatalf("failure = %q", failure.Error())
+	}
+}
+
+type validatorFunc func(context.Context, validation.Request) (validation.Report, error)
+
+func (f validatorFunc) Validate(ctx context.Context, request validation.Request) (validation.Report, error) {
+	return f(ctx, request)
 }

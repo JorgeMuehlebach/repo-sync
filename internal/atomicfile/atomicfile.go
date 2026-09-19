@@ -36,3 +36,9 @@ func Write(path string, data []byte, permissions os.FileMode) error {
 	}
 	return nil
 }
+
+// Replace atomically installs an already-written file over destination using
+// the platform-specific durable replacement primitive.
+func Replace(source, destination string) error {
+	return replace(source, destination)
+}

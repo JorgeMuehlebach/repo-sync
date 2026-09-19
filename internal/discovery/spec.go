@@ -3,9 +3,11 @@ package discovery
 import (
 	"fmt"
 	"net/url"
-	"path"
+	"regexp"
 	"strings"
 )
+
+var remoteComponentPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 type RepositorySpec struct {
 	OriginalURL string
@@ -45,15 +47,22 @@ func ParseGitHubBranchURL(raw string) (RepositorySpec, error) {
 	if err != nil {
 		return RepositorySpec{}, fmt.Errorf("parse repository URL: %w", err)
 	}
-	if !strings.EqualFold(u.Scheme, "https") || !strings.EqualFold(u.Hostname(), "github.com") {
+	if u.Scheme != "https" || !strings.EqualFold(u.Hostname(), "github.com") || u.Port() != "" || u.Opaque != "" {
 		return RepositorySpec{}, fmt.Errorf("repository URL must be an https://github.com link")
 	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" {
 		return RepositorySpec{}, fmt.Errorf("repository URL cannot contain credentials, query parameters, or fragments")
 	}
-	parts := escapedPathParts(u.EscapedPath())
+	escapedPath := u.EscapedPath()
+	if !strings.HasPrefix(escapedPath, "/") || strings.HasPrefix(escapedPath, "//") || strings.HasSuffix(escapedPath, "/") || strings.Contains(escapedPath, "\\") {
+		return RepositorySpec{}, fmt.Errorf("repository URL path must use its canonical form")
+	}
+	parts := escapedPathParts(escapedPath)
 	if len(parts) < 4 || parts[2] != "tree" {
 		return RepositorySpec{}, fmt.Errorf("repository URL must include a branch, for example https://github.com/owner/repo/tree/main")
+	}
+	if strings.Contains(parts[0], "%") || strings.Contains(parts[1], "%") {
+		return RepositorySpec{}, fmt.Errorf("repository owner and name must use their canonical form")
 	}
 	owner, err := url.PathUnescape(parts[0])
 	if err != nil {
@@ -72,7 +81,7 @@ func ParseGitHubBranchURL(raw string) (RepositorySpec, error) {
 		branchParts = append(branchParts, decoded)
 	}
 	branch := strings.Join(branchParts, "/")
-	if owner == "" || name == "" || branch == "" {
+	if owner == "" || name == "" || branch == "" || !remoteComponentPattern.MatchString(owner) || !remoteComponentPattern.MatchString(name) || owner == "." || owner == ".." || name == "." || name == ".." {
 		return RepositorySpec{}, fmt.Errorf("repository owner, name, and branch are required")
 	}
 	escapedBranch := make([]string, 0, len(branchParts))
@@ -100,34 +109,53 @@ func escapedPathParts(value string) []string {
 func CanonicalRemote(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if strings.HasPrefix(raw, "git@github.com:") {
-		return canonicalOwnerRepo(strings.TrimPrefix(raw, "git@github.com:"))
+		value := strings.TrimPrefix(raw, "git@github.com:")
+		if strings.ContainsAny(value, "?#@:\\") {
+			return "", fmt.Errorf("remote SSH path is invalid")
+		}
+		return canonicalOwnerRepo(value)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", err
 	}
-	if !strings.EqualFold(u.Hostname(), "github.com") {
+	if u.Scheme != "https" && u.Scheme != "ssh" {
+		return "", fmt.Errorf("remote scheme must be https or ssh")
+	}
+	if !strings.EqualFold(u.Hostname(), "github.com") || u.Port() != "" {
 		return "", fmt.Errorf("remote is not hosted on github.com")
 	}
-	allowedSSHUser := false
-	if u.User != nil && strings.EqualFold(u.Scheme, "ssh") && u.User.Username() == "git" {
-		_, hasPassword := u.User.Password()
-		allowedSSHUser = !hasPassword
+	if u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" || u.Opaque != "" {
+		return "", fmt.Errorf("remote URL cannot contain query parameters or fragments")
 	}
-	if (u.User != nil && !allowedSSHUser) || u.RawQuery != "" {
+	if u.Scheme == "https" && u.User != nil {
 		return "", fmt.Errorf("remote URL cannot contain credentials or query parameters; use a credential manager")
 	}
-	return canonicalOwnerRepo(strings.TrimPrefix(path.Clean(u.Path), "/"))
+	if u.Scheme == "ssh" {
+		if u.User == nil || u.User.Username() != "git" {
+			return "", fmt.Errorf("SSH remotes must use the git user")
+		}
+		if _, hasPassword := u.User.Password(); hasPassword {
+			return "", fmt.Errorf("remote URL cannot contain credentials")
+		}
+	}
+	if u.RawPath != "" || strings.Contains(u.EscapedPath(), "%") || !strings.HasPrefix(u.Path, "/") {
+		return "", fmt.Errorf("remote path must use its canonical form")
+	}
+	return canonicalOwnerRepo(strings.TrimPrefix(u.Path, "/"))
 }
 
 func canonicalOwnerRepo(value string) (string, error) {
-	parts := strings.Split(strings.Trim(value, "/"), "/")
+	if value == "" || strings.Trim(value, "/") != value || strings.Contains(value, "//") {
+		return "", fmt.Errorf("remote path must use its canonical form")
+	}
+	parts := strings.Split(value, "/")
 	if len(parts) != 2 {
 		return "", fmt.Errorf("remote must identify one GitHub owner and repository")
 	}
 	owner := strings.TrimSpace(parts[0])
 	name := strings.TrimSuffix(strings.TrimSpace(parts[1]), ".git")
-	if owner == "" || name == "" {
+	if owner == "" || name == "" || owner == "." || owner == ".." || name == "." || name == ".." || !remoteComponentPattern.MatchString(owner) || !remoteComponentPattern.MatchString(name) {
 		return "", fmt.Errorf("remote owner and repository cannot be empty")
 	}
 	return strings.ToLower(owner + "/" + name), nil
