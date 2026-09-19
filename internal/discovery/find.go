@@ -2,13 +2,15 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/JorgeMuehlebach/repo-sync/internal/gitexec"
 )
 
 var skippedDirectories = map[string]bool{
@@ -24,7 +26,14 @@ var skippedDirectories = map[string]bool{
 	".cache":           true,
 }
 
-func Find(ctx context.Context, roots []string, wanted map[string]bool) (map[string][]string, error) {
+type GitRunner interface {
+	Run(context.Context, string, ...string) gitexec.Result
+}
+
+func Find(ctx context.Context, runner GitRunner, roots []string, wanted map[string]bool) (map[string][]string, error) {
+	if runner == nil {
+		return nil, fmt.Errorf("trusted Git dependency is unavailable")
+	}
 	result := make(map[string][]string)
 	seenRoots := make(map[string]bool)
 	for _, root := range roots {
@@ -52,7 +61,10 @@ func Find(ctx context.Context, roots []string, wanted map[string]bool) (map[stri
 			name := entry.Name()
 			if name == ".git" {
 				repoPath := filepath.Dir(current)
-				remote, err := gitOutput(ctx, repoPath, "config", "--get", "remote.origin.url")
+				remote, err := gitOutput(ctx, runner, repoPath, "config", "--get", "remote.origin.url")
+				if errors.Is(err, gitexec.ErrDependencyUnavailable) {
+					return err
+				}
 				if err == nil {
 					key, err := CanonicalRemote(remote)
 					if err == nil && wanted[key] {
@@ -76,9 +88,15 @@ func Find(ctx context.Context, roots []string, wanted map[string]bool) (map[stri
 	return result, nil
 }
 
-func ValidatePath(ctx context.Context, repoPath string, spec RepositorySpec) error {
-	root, err := gitOutput(ctx, repoPath, "rev-parse", "--show-toplevel")
+func ValidatePath(ctx context.Context, runner GitRunner, repoPath string, spec RepositorySpec) error {
+	if runner == nil {
+		return fmt.Errorf("trusted Git dependency is unavailable")
+	}
+	root, err := gitOutput(ctx, runner, repoPath, "rev-parse", "--show-toplevel")
 	if err != nil {
+		if errors.Is(err, gitexec.ErrDependencyUnavailable) {
+			return err
+		}
 		return fmt.Errorf("%s is not a Git working tree", repoPath)
 	}
 	absoluteRoot, err := filepath.Abs(root)
@@ -94,8 +112,11 @@ func ValidatePath(ctx context.Context, repoPath string, spec RepositorySpec) err
 	if rootErr != nil || pathErr != nil || !os.SameFile(rootInfo, pathInfo) {
 		return fmt.Errorf("%s is inside a repository; enter its root %s", repoPath, absoluteRoot)
 	}
-	remote, err := gitOutput(ctx, repoPath, "config", "--get", "remote.origin.url")
+	remote, err := gitOutput(ctx, runner, repoPath, "config", "--get", "remote.origin.url")
 	if err != nil {
+		if errors.Is(err, gitexec.ErrDependencyUnavailable) {
+			return err
+		}
 		return fmt.Errorf("read origin remote: %w", err)
 	}
 	key, err := CanonicalRemote(remote)
@@ -105,52 +126,13 @@ func ValidatePath(ctx context.Context, repoPath string, spec RepositorySpec) err
 	return nil
 }
 
-func SpecFromPath(ctx context.Context, repoPath string) (RepositorySpec, string, error) {
-	root, err := gitOutput(ctx, repoPath, "rev-parse", "--show-toplevel")
-	if err != nil {
-		return RepositorySpec{}, "", fmt.Errorf("%s is not a Git working tree", repoPath)
+func gitOutput(ctx context.Context, runner GitRunner, dir string, args ...string) (string, error) {
+	result := runner.Run(ctx, dir, args...)
+	if result.Err != nil {
+		if errors.Is(result.Err, gitexec.ErrDependencyUnavailable) {
+			return "", gitexec.ErrDependencyUnavailable
+		}
+		return "", fmt.Errorf("git %s failed", strings.Join(args, " "))
 	}
-	absoluteRoot, err := filepath.Abs(root)
-	if err != nil {
-		return RepositorySpec{}, "", err
-	}
-	absolutePath, err := filepath.Abs(repoPath)
-	if err != nil {
-		return RepositorySpec{}, "", err
-	}
-	rootInfo, rootErr := os.Stat(absoluteRoot)
-	pathInfo, pathErr := os.Stat(absolutePath)
-	if rootErr != nil || pathErr != nil || !os.SameFile(rootInfo, pathInfo) {
-		return RepositorySpec{}, "", fmt.Errorf("%s is inside a repository; enter its root %s", repoPath, absoluteRoot)
-	}
-	remote, err := gitOutput(ctx, absoluteRoot, "config", "--get", "remote.origin.url")
-	if err != nil {
-		return RepositorySpec{}, "", fmt.Errorf("read origin remote: %w", err)
-	}
-	key, err := CanonicalRemote(remote)
-	if err != nil {
-		return RepositorySpec{}, "", fmt.Errorf("read GitHub origin: %w", err)
-	}
-	branch, err := gitOutput(ctx, absoluteRoot, "branch", "--show-current")
-	if err != nil {
-		return RepositorySpec{}, "", fmt.Errorf("read current branch: %w", err)
-	}
-	if branch == "" {
-		return RepositorySpec{}, "", fmt.Errorf("detached HEAD is not supported; check out the branch to synchronize")
-	}
-	spec, err := NewGitHubRepositorySpec(key, branch)
-	if err != nil {
-		return RepositorySpec{}, "", err
-	}
-	return spec, absoluteRoot, nil
-}
-
-func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(output)))
-	}
-	return strings.TrimSpace(string(output)), nil
+	return result.Output, nil
 }

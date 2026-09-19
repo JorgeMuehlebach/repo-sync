@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:jorge:context-system:schema:repo-sync-status:2",
+  "title": "Repo Sync context status v2",
+  "description": "Bounded, sanitized Repo Sync state consumed read-only by Context Doctor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol", "generated_at", "service", "repositories"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "protocol": { "const": "repo-sync.context-status.v2" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "enabled"],
+      "properties": {
+        "state": { "enum": ["running", "stopped", "unavailable", "unknown"] },
+        "enabled": { "type": "boolean" },
+        "interval_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 }
+      }
+    },
+    "repositories": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repository_id", "mode", "branch", "validation_config"],
+        "properties": {
+          "repository_id": { "$ref": "#/$defs/repositoryId" },
+          "mode": { "enum": ["publish", "mirror"] },
+          "branch": { "$ref": "#/$defs/gitBranch" },
+          "last_attempt_at": { "type": "string", "format": "date-time" },
+          "last_success_at": { "type": "string", "format": "date-time" },
+          "accepted_commit": { "$ref": "#/$defs/gitObjectId" },
+          "candidate_commit": { "$ref": "#/$defs/gitObjectId" },
+          "validation_config": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["protocol", "source_id", "contextctl_binary_digest", "registry_revision", "registry_digest", "trust_state_revision", "trust_state_digest"],
+            "properties": {
+              "protocol": { "const": "contextctl.report.v2" },
+              "source_id": { "$ref": "#/$defs/dottedId" },
+              "contextctl_binary_digest": { "$ref": "#/$defs/sha256Digest" },
+              "registry_revision": { "type": "integer", "minimum": 1 },
+              "registry_digest": { "$ref": "#/$defs/sha256Digest" },
+              "trust_state_revision": { "type": "integer", "minimum": 0 },
+              "trust_state_digest": { "$ref": "#/$defs/sha256Digest" }
+            }
+          },
+          "last_validation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["contract_version", "tree_object_id", "verdict", "check_ids", "validator_results"],
+            "properties": {
+              "contract_version": { "$ref": "#/$defs/semanticVersion" },
+              "tree_object_id": { "$ref": "#/$defs/gitObjectId" },
+              "verdict": { "enum": ["pass", "fail", "hold", "incomplete"] },
+              "check_ids": { "$ref": "#/$defs/checkIds" },
+              "validator_results": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["contract_id", "contract_version", "disposition", "check_ids"],
+                  "properties": {
+                    "contract_id": { "$ref": "#/$defs/dottedId" },
+                    "contract_version": { "$ref": "#/$defs/semanticVersion" },
+                    "disposition": { "enum": ["pass", "fail", "hold", "skip"] },
+                    "check_ids": { "$ref": "#/$defs/checkIds" },
+                    "accepted_bundle_digest": { "$ref": "#/$defs/sha256Digest" },
+                    "candidate_bundle_digest": { "$ref": "#/$defs/sha256Digest" }
+                  }
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "verdict": { "const": "pass" } }, "required": ["verdict"] },
+                "then": {
+                  "properties": {
+                    "validator_results": {
+                      "minItems": 1,
+                      "items": { "properties": { "disposition": { "const": "pass" } } }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "phase", "check_ids", "paths"],
+            "properties": {
+              "code": { "$ref": "#/$defs/checkId" },
+              "phase": { "enum": ["setup", "fetch", "candidate", "validation", "promotion", "publish", "notification"] },
+              "check_ids": { "$ref": "#/$defs/checkIds" },
+              "paths": {
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": { "$ref": "#/$defs/diagnosticPath" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "semanticVersion": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$" },
+    "dottedId": { "type": "string", "pattern": "^[a-z0-9]+([.-][a-z0-9]+)+$", "maxLength": 160 },
+    "repositoryId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$" },
+    "gitBranch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^.+$",
+      "allOf": [
+        { "not": { "pattern": "^/" } },
+        { "not": { "pattern": "\\.\\.|//|@\\{|\\\\|[ ~^:?*]" } },
+        { "not": { "pattern": "\\[" } },
+        { "not": { "pattern": "[/.]$" } }
+      ]
+    },
+    "gitObjectId": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" },
+    "sha256Digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "checkId": { "type": "string", "pattern": "^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$", "maxLength": 100 },
+    "checkIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/checkId" }
+    },
+    "diagnosticPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\x00\\r\\n]+$",
+      "allOf": [
+        { "not": { "pattern": "^/" } },
+        { "not": { "pattern": "^[A-Za-z]:[\\\\/]" } },
+        { "not": { "pattern": "\\\\" } },
+        { "not": { "pattern": "(^|/)\\.\\.(/|$)" } }
+      ]
+    }
+  }
+}

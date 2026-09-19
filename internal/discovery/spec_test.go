@@ -24,6 +24,21 @@ func TestParseGitHubBranchURLRejectsCredentials(t *testing.T) {
 	}
 }
 
+func TestParseGitHubBranchURLRejectsNonCanonicalRepositoryIdentity(t *testing.T) {
+	for _, input := range []string{
+		"https://github.com:443/owner/repo/tree/main",
+		"https://github.com//owner/repo/tree/main",
+		"https://github.com/owner/repo/tree/main/",
+		"https://github.com/%6fwner/repo/tree/main",
+		"https://github.com/owner/%72epo/tree/main",
+		"https://github.com/owner%2Frepo/name/tree/main",
+	} {
+		if _, err := ParseGitHubBranchURL(input); err == nil {
+			t.Fatalf("ParseGitHubBranchURL(%q) accepted a non-canonical identity", input)
+		}
+	}
+}
+
 func TestCanonicalRemote(t *testing.T) {
 	tests := map[string]string{
 		"https://github.com/Owner/Repo.git":   "owner/repo",
@@ -39,8 +54,26 @@ func TestCanonicalRemote(t *testing.T) {
 			t.Fatalf("CanonicalRemote(%q) = %q, want %q", input, got, want)
 		}
 	}
-	if _, err := CanonicalRemote("https://token@github.com/owner/repo.git"); err == nil {
-		t.Fatal("expected credential-bearing remote to be rejected")
+	for _, input := range []string{
+		"https://token@github.com/owner/repo.git",
+		"http://github.com/owner/repo.git",
+		"file://github.com/owner/repo.git",
+		"ext::sh -c evil",
+		"https://github.com/owner/repo.git#fragment",
+		"https://github.com:443/owner/repo.git",
+		"ssh://root@github.com/owner/repo.git",
+		"ssh://git@github.com:22/owner/repo.git",
+		"git@github.com:owner/repo.git#fragment",
+		"https://github.com/owner/repo/extra.git",
+		"https://github.com/owner/%72epo.git",
+		"https://github.com/owner/repo.git/",
+		"https://github.com//owner/repo.git",
+		"git@github.com:/owner/repo.git",
+		"git@github.com:owner/repo.git/",
+	} {
+		if _, err := CanonicalRemote(input); err == nil {
+			t.Fatalf("CanonicalRemote(%q) accepted unsafe remote", input)
+		}
 	}
 }
 
