@@ -1122,7 +1122,12 @@ func writeExecutable(t *testing.T, path, contents string) {
 
 func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	command := exec.Command("git", args...)
+	commandArgs := append([]string{
+		"-c", "core.longpaths=true",
+		"-c", "core.autocrlf=false",
+		"-c", "core.safecrlf=false",
+	}, args...)
+	command := exec.Command("git", commandArgs...)
 	command.Dir = dir
 	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1")
 	output, err := command.CombinedOutput()
