@@ -685,6 +685,27 @@ func TestMirrorRejectsDirtyWrongBranchAndOperationMarker(t *testing.T) {
 			t.Fatalf("trusted global credential helper was rejected: %#v", failure)
 		}
 	})
+	t.Run("multiple worktrees without worktree config remain inspectable", func(t *testing.T) {
+		fixture := newRepositoryFixture(t)
+		linked := filepath.Join(fixture.root, "linked-worktree")
+		runGit(t, fixture.publisher, "worktree", "add", "--detach", linked, "HEAD")
+		if failure := newBase(fixture.runner(), nil).validateRepository(context.Background(), fixture.target(fixture.publisher), "main"); failure != nil {
+			t.Fatalf("repository without worktree-scoped config was rejected: %#v", failure)
+		}
+	})
+	t.Run("worktree credential helper", func(t *testing.T) {
+		fixture := newRepositoryFixture(t)
+		marker := filepath.Join(fixture.root, "worktree-credential-helper-executed")
+		runGit(t, fixture.mirror, "config", "extensions.worktreeConfig", "true")
+		runGit(t, fixture.mirror, "config", "--worktree", "credential.helper", "!echo executed > "+marker)
+		_, failure := NewMirror(fixture.runner(), &recordingValidator{}).syncTransactionForTest(context.Background(), fixture.target(fixture.mirror))
+		if failure == nil || failure.Code != "REPO-GIT-EXECUTABLE-CONFIG" {
+			t.Fatalf("failure = %#v", failure)
+		}
+		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("worktree credential helper executed: %v", err)
+		}
+	})
 }
 
 func TestRepositoryValidationRejectsRemoteRewritesAndAlternateEndpoints(t *testing.T) {
