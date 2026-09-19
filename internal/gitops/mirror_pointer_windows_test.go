@@ -28,8 +28,11 @@ func TestWindowsMirrorPointerAtomicReplacementRuntime(t *testing.T) {
 	if err := backend.Create(pointer, first); err != nil {
 		t.Fatalf("create junction: %v", err)
 	}
+	before, beforeErr := windowsMirrorPointerInfo(pointer)
 	if err := backend.Replace(pointer, first, second); err != nil {
-		t.Fatalf("FileRenameInfoEx junction replacement is unavailable: %v", err)
+		resolved, resolveErr := backend.Resolve(pointer)
+		after, afterErr := windowsMirrorPointerInfo(pointer)
+		t.Fatalf("FileRenameInfoEx junction replacement is unavailable: %v (resolved %q, want %q, resolve error %v, identity unchanged %v, identity errors %v/%v)", err, resolved, second, resolveErr, beforeErr == nil && afterErr == nil && os.SameFile(before, after), beforeErr, afterErr)
 	}
 	resolved, err := backend.Resolve(pointer)
 	if err != nil || !sameMirrorPath(resolved, second) {

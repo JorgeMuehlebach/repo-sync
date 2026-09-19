@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/JorgeMuehlebach/repo-sync/internal/securefile"
@@ -15,6 +16,8 @@ import (
 )
 
 type systemMirrorPointerBackend struct{}
+
+const windowsPointerReplaceAttempts = 8
 
 type windowsFileRenameInfo struct {
 	Flags          uint32
@@ -89,15 +92,19 @@ func (backend systemMirrorPointerBackend) Replace(exposed, expected, next string
 	if err != nil {
 		return &mirrorAtomicPointerError{err: fmt.Errorf("mirror pointer identity is invalid")}
 	}
-	id, err := newMirrorTransactionID()
-	if err != nil {
+	temporary := ""
+	stageTemporary := func() error {
+		id, err := newMirrorTransactionID()
+		if err != nil {
+			return err
+		}
+		temporary = filepath.Join(filepath.Dir(exposed), ".repo-sync-pointer-"+id)
+		return createWindowsJunction(temporary, next)
+	}
+	if err := stageTemporary(); err != nil {
 		return &mirrorAtomicPointerError{err: err}
 	}
-	temporary := filepath.Join(filepath.Dir(exposed), ".repo-sync-pointer-"+id)
-	if err := createWindowsJunction(temporary, next); err != nil {
-		return &mirrorAtomicPointerError{err: err}
-	}
-	defer os.Remove(temporary)
+	defer func() { _ = os.Remove(temporary) }()
 	after, err := windowsMirrorPointerInfo(exposed)
 	if err != nil || !os.SameFile(before, after) {
 		return &mirrorAtomicPointerError{err: fmt.Errorf("mirror pointer changed during replacement")}
@@ -106,17 +113,66 @@ func (backend systemMirrorPointerBackend) Replace(exposed, expected, next string
 	if err != nil || !sameMirrorPath(resolved, expected) {
 		return &mirrorAtomicPointerError{err: fmt.Errorf("mirror pointer target changed during replacement")}
 	}
-	if err := replaceWindowsPointer(temporary, exposed); err != nil {
-		return &mirrorAtomicPointerError{err: err}
+	var replaceErr error
+	replaced := false
+	for attempt := 0; attempt < windowsPointerReplaceAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 10 * time.Millisecond)
+			after, err = windowsMirrorPointerInfo(exposed)
+			if err != nil || !os.SameFile(before, after) {
+				return &mirrorAtomicPointerError{err: fmt.Errorf("mirror pointer changed during replacement retry")}
+			}
+			resolved, err = backend.Resolve(exposed)
+			if err != nil || !sameMirrorPath(resolved, expected) {
+				return &mirrorAtomicPointerError{err: fmt.Errorf("mirror pointer target changed during replacement retry")}
+			}
+			if _, err := os.Lstat(temporary); err == nil {
+				if err := os.Remove(temporary); err != nil {
+					return &mirrorAtomicPointerError{err: fmt.Errorf("temporary mirror pointer could not be retired during replacement retry")}
+				}
+			} else if !os.IsNotExist(err) {
+				return &mirrorAtomicPointerError{err: fmt.Errorf("temporary mirror pointer could not be inspected during replacement retry")}
+			}
+			if err := stageTemporary(); err != nil {
+				return &mirrorAtomicPointerError{err: fmt.Errorf("temporary mirror pointer could not be restaged during replacement retry")}
+			}
+		}
+		replaceErr = replaceWindowsPointer(temporary, exposed)
+		active, resolveErr := backend.Resolve(exposed)
+		if replaceErr == nil && resolveErr == nil && sameMirrorPath(active, next) {
+			replaced = true
+			break
+		}
+		if resolveErr != nil || !sameMirrorPath(active, expected) {
+			// A failed durability flush can be reported after the atomic rename.
+			// The caller must observe and roll back that ambiguous outcome rather
+			// than retrying a pointer that may already expose the candidate.
+			if replaceErr == nil {
+				replaceErr = fmt.Errorf("atomic replacement had an ambiguous result")
+			}
+			return &mirrorAtomicPointerError{err: replaceErr}
+		}
+		if replaceErr == nil {
+			replaceErr = fmt.Errorf("atomic replacement reported success without exposing the next generation")
+		}
+	}
+	if !replaced {
+		return &mirrorAtomicPointerError{err: replaceErr}
 	}
 	if err := syncMirrorDirectory(filepath.Dir(exposed)); err != nil {
 		return &mirrorAtomicPointerError{err: err}
 	}
-	resolved, err = backend.Resolve(exposed)
-	if err != nil || !sameMirrorPath(resolved, next) {
-		return &mirrorAtomicPointerError{err: fmt.Errorf("atomic replacement did not expose the next generation")}
+	for attempt := 0; attempt < windowsPointerReplaceAttempts; attempt++ {
+		resolved, err = backend.Resolve(exposed)
+		if err == nil && sameMirrorPath(resolved, next) {
+			return nil
+		}
+		if err == nil && !sameMirrorPath(resolved, expected) {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 	}
-	return nil
+	return &mirrorAtomicPointerError{err: fmt.Errorf("atomic replacement did not expose the next generation")}
 }
 
 // replaceWindowsPointer intentionally uses FileRenameInfoEx rather than
@@ -148,7 +204,12 @@ func replaceWindowsPointer(source, destination string) error {
 	destinationName = destinationName[:len(destinationName)-1]
 	var template windowsFileRenameInfo
 	nameOffset := int(unsafe.Offsetof(template.FileName))
-	buffer := make([]byte, nameOffset+len(destinationName)*2)
+	// Keep explicit terminator space and round the variable structure to the
+	// native 8-byte boundary. Some Windows filesystems otherwise accept the
+	// call but intermittently leave the namespace unchanged.
+	bufferSize := nameOffset + (len(destinationName)+1)*2
+	bufferSize = (bufferSize + 7) &^ 7
+	buffer := make([]byte, bufferSize)
 	information := (*windowsFileRenameInfo)(unsafe.Pointer(&buffer[0]))
 	information.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
 	information.FileNameLength = uint32(len(destinationName) * 2)
