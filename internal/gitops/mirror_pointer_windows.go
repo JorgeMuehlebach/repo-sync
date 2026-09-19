@@ -31,24 +31,32 @@ func (systemMirrorPointerBackend) Resolve(exposed string) (string, error) {
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return "", fmt.Errorf("mirror pointer is not a junction or symbolic link")
 	}
-	target, err := os.Readlink(exposed)
+	name, err := windows.UTF16PtrFromString(exposed)
 	if err != nil {
 		return "", err
 	}
-	target = normalizeWindowsJunctionTarget(target)
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(exposed), target)
-	}
-	target, err = filepath.Abs(target)
+	handle, err := windows.CreateFile(
+		name,
+		0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS,
+		0,
+	)
 	if err != nil {
 		return "", err
 	}
-	target = filepath.Clean(target)
-	targetInfo, err := os.Stat(target)
-	if err != nil || !targetInfo.IsDir() {
+	defer windows.CloseHandle(handle)
+	var targetInformation windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &targetInformation); err != nil || targetInformation.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		return "", fmt.Errorf("mirror pointer target is not a directory")
 	}
-	return target, nil
+	target, err := finalWindowsMirrorPath(handle)
+	if err != nil || !filepath.IsAbs(target) {
+		return "", fmt.Errorf("resolve mirror pointer target")
+	}
+	return filepath.Clean(target), nil
 }
 
 func (backend systemMirrorPointerBackend) Create(exposed, target string) error {
@@ -234,6 +242,15 @@ func normalizeWindowsJunctionTarget(target string) string {
 	}
 	target = strings.TrimPrefix(target, `\\?\`)
 	return strings.TrimPrefix(target, `\??\`)
+}
+
+func finalWindowsMirrorPath(handle windows.Handle) (string, error) {
+	buffer := make([]uint16, 32768)
+	length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], uint32(len(buffer)), 0)
+	if err != nil || length == 0 || int(length) >= len(buffer) {
+		return "", fmt.Errorf("resolve final Windows path")
+	}
+	return normalizeWindowsJunctionTarget(windows.UTF16ToString(buffer[:length])), nil
 }
 
 func requireCanonicalMirrorPointerPath(path string) error {
