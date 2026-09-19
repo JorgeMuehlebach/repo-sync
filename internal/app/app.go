@@ -913,14 +913,11 @@ func registeredRootMatches(root registryLocalPath, repository configuredReposito
 func reconcileSourceManifest(repository configuredRepository, repositoryPath string) error {
 	manifestRoot := repositoryPath
 	if repository.Config.EffectiveMode() == config.ModeMirror {
-		resolved, err := filepath.EvalSymlinks(repositoryPath)
+		resolved, err := gitops.ResolveMirrorPointer(repositoryPath)
 		if err != nil {
 			return fmt.Errorf("repository %s stable mirror pointer is unavailable", repository.ID)
 		}
-		manifestRoot, err = filepath.Abs(resolved)
-		if err != nil {
-			return fmt.Errorf("repository %s stable mirror pointer is unavailable", repository.ID)
-		}
+		manifestRoot = resolved
 	}
 	file, err := securefile.OpenRegularBeneath(manifestRoot, ".agents/context-source.yaml")
 	if err != nil {
