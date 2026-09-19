@@ -141,3 +141,5 @@ func syncMirrorDirectory(path string) error {
 }
 
 func mirrorPathCaseInsensitive() bool { return false }
+
+func normalizeMirrorPathForComparison(path string) string { return filepath.Clean(path) }

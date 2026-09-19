@@ -504,7 +504,7 @@ func TestStatusJSONIsSanitizedAndUsesFrozenFields(t *testing.T) {
 	if persisted["schema_version"] != float64(contextStatusSchema) || persisted["protocol"] != contextStatusProtocol {
 		t.Fatalf("persisted context status = %#v", persisted)
 	}
-	if info, err := os.Stat(filepath.Join(application.configDir, "context-status.json")); err != nil || info.Mode().Perm()&0o077 != 0 {
+	if info, err := os.Stat(filepath.Join(application.configDir, "context-status.json")); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) {
 		t.Fatalf("context status permissions = %v, %v", info, err)
 	}
 }

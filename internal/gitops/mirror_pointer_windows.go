@@ -280,3 +280,16 @@ func syncMirrorDirectory(path string) error {
 }
 
 func mirrorPathCaseInsensitive() bool { return true }
+
+func normalizeMirrorPathForComparison(path string) string {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	buffer := make([]uint16, 32768)
+	length, err := windows.GetLongPathName(name, &buffer[0], uint32(len(buffer)))
+	if err != nil || length == 0 || int(length) >= len(buffer) {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(normalizeWindowsJunctionTarget(windows.UTF16ToString(buffer[:length])))
+}

@@ -427,10 +427,12 @@ func makeMirrorGenerationDurable(root string) error {
 }
 
 func sameMirrorPath(left, right string) bool {
+	left = normalizeMirrorPathForComparison(left)
+	right = normalizeMirrorPathForComparison(right)
 	if mirrorPathCaseInsensitive() {
-		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+		return strings.EqualFold(left, right)
 	}
-	return filepath.Clean(left) == filepath.Clean(right)
+	return left == right
 }
 
 // cleanupOrphanedMirrorCandidates bounds private disk use after crashes and
