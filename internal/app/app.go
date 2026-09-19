@@ -1156,10 +1156,7 @@ func canonicalMirrorRoot(path string) (string, error) {
 	if err != nil || !sameConfiguredPath(parent, filepath.Dir(absolute)) {
 		return "", fmt.Errorf("mirror path has a linked ancestor")
 	}
-	if !gitops.IsMirrorPointer(absolute) {
-		return "", fmt.Errorf("mirror path is not a stable filesystem pointer")
-	}
-	resolved, err := filepath.EvalSymlinks(absolute)
+	resolved, err := gitops.ResolveMirrorPointer(absolute)
 	if err != nil {
 		return "", fmt.Errorf("resolve mirror pointer: %w", err)
 	}
