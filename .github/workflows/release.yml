@@ -61,7 +61,7 @@ jobs:
             asset_os: linux
             extension: tar.gz
             binary: repo-sync
-          - runner: macos-13
+          - runner: macos-latest
             asset_os: darwin
             extension: tar.gz
             binary: repo-sync
