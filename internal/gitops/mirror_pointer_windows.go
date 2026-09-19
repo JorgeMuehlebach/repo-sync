@@ -31,32 +31,19 @@ func (systemMirrorPointerBackend) Resolve(exposed string) (string, error) {
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		return "", fmt.Errorf("mirror pointer is not a junction or symbolic link")
 	}
-	name, err := windows.UTF16PtrFromString(exposed)
+	target, err := filepath.EvalSymlinks(exposed)
 	if err != nil {
 		return "", err
 	}
-	handle, err := windows.CreateFile(
-		name,
-		0,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS,
-		0,
-	)
-	if err != nil {
-		return "", err
-	}
-	defer windows.CloseHandle(handle)
-	var targetInformation windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &targetInformation); err != nil || targetInformation.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		return "", fmt.Errorf("mirror pointer target is not a directory")
-	}
-	target, err := finalWindowsMirrorPath(handle)
+	target, err = filepath.Abs(target)
 	if err != nil || !filepath.IsAbs(target) {
 		return "", fmt.Errorf("resolve mirror pointer target")
 	}
-	return filepath.Clean(target), nil
+	target = filepath.Clean(target)
+	if _, err := securefile.VerifyDirectoryNoReparse(target); err != nil {
+		return "", fmt.Errorf("mirror pointer target is not a directory")
+	}
+	return target, nil
 }
 
 func (backend systemMirrorPointerBackend) Create(exposed, target string) error {
@@ -242,15 +229,6 @@ func normalizeWindowsJunctionTarget(target string) string {
 	}
 	target = strings.TrimPrefix(target, `\\?\`)
 	return strings.TrimPrefix(target, `\??\`)
-}
-
-func finalWindowsMirrorPath(handle windows.Handle) (string, error) {
-	buffer := make([]uint16, 32768)
-	length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], uint32(len(buffer)), 0)
-	if err != nil || length == 0 || int(length) >= len(buffer) {
-		return "", fmt.Errorf("resolve final Windows path")
-	}
-	return normalizeWindowsJunctionTarget(windows.UTF16ToString(buffer[:length])), nil
 }
 
 func requireCanonicalMirrorPointerPath(path string) error {
