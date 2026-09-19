@@ -284,9 +284,8 @@ func TestInitializeMirrorCreatesIndependentStableLayout(t *testing.T) {
 	if outcome.AcceptedCommit != "" || outcome.CandidateCommit == "" || outcome.CandidateTree == "" {
 		t.Fatalf("bootstrap outcome = %#v", outcome)
 	}
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("bootstrap pointer info = %#v, %v", info, err)
+	if !isMirrorPointer(path) {
+		t.Fatal("bootstrap path is not a managed pointer")
 	}
 	layout, err := deriveMirrorLayout(target)
 	if err != nil {

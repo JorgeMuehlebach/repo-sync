@@ -299,7 +299,7 @@ func (m Mirror) requireBaselineUnchanged(ctx context.Context, target Target, bas
 }
 
 func (m Mirror) verifyGeneration(ctx context.Context, path, generationID, commit, tree, phase string) *OperationError {
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+	if isMirrorPointer(path) {
 		resolved, resolveErr := m.pointers.Resolve(path)
 		if resolveErr != nil {
 			return &OperationError{Code: "REPO-MIRROR-GENERATION", Phase: phase, Summary: "mirror generation pointer could not be resolved"}

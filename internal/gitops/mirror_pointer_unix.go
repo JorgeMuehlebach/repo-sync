@@ -143,3 +143,8 @@ func syncMirrorDirectory(path string) error {
 func mirrorPathCaseInsensitive() bool { return false }
 
 func normalizeMirrorPathForComparison(path string) string { return filepath.Clean(path) }
+
+func isMirrorPointer(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
+}

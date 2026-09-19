@@ -291,6 +291,11 @@ func syncMirrorDirectory(path string) error {
 
 func mirrorPathCaseInsensitive() bool { return true }
 
+func isMirrorPointer(path string) bool {
+	_, err := windowsMirrorPointerInfo(path)
+	return err == nil
+}
+
 func normalizeMirrorPathForComparison(path string) string {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {

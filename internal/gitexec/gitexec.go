@@ -195,6 +195,8 @@ func (r SystemRunner) run(ctx context.Context, dir string, input []byte, environ
 		"-c", "core.hooksPath=" + hooksPath,
 		"-c", "core.fsmonitor=false",
 		"-c", "core.untrackedCache=false",
+		"-c", "core.autocrlf=false",
+		"-c", "core.safecrlf=false",
 		"-c", "core.attributesFile=" + attributesPath,
 		"-c", "core.pager=cat",
 		"-c", "submodule.recurse=false",
