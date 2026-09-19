@@ -27,13 +27,16 @@ func (systemMirrorPointerBackend) Resolve(exposed string) (string, error) {
 	if err := requireCanonicalMirrorPointerPath(exposed); err != nil {
 		return "", err
 	}
-	info, err := os.Lstat(exposed)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+	if _, err := windowsMirrorPointerInfo(exposed); err != nil {
 		return "", fmt.Errorf("mirror pointer is not a junction or symbolic link")
 	}
-	target, err := filepath.EvalSymlinks(exposed)
+	target, err := os.Readlink(exposed)
 	if err != nil {
 		return "", err
+	}
+	target = normalizeWindowsJunctionTarget(target)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(exposed), target)
 	}
 	target, err = filepath.Abs(target)
 	if err != nil || !filepath.IsAbs(target) {
@@ -82,8 +85,8 @@ func (backend systemMirrorPointerBackend) Replace(exposed, expected, next string
 	if err != nil || !sameMirrorPath(resolved, expected) {
 		return &mirrorAtomicPointerError{err: fmt.Errorf("mirror pointer changed before replacement")}
 	}
-	before, err := os.Lstat(exposed)
-	if err != nil || before.Mode()&os.ModeSymlink == 0 {
+	before, err := windowsMirrorPointerInfo(exposed)
+	if err != nil {
 		return &mirrorAtomicPointerError{err: fmt.Errorf("mirror pointer identity is invalid")}
 	}
 	id, err := newMirrorTransactionID()
@@ -95,7 +98,7 @@ func (backend systemMirrorPointerBackend) Replace(exposed, expected, next string
 		return &mirrorAtomicPointerError{err: err}
 	}
 	defer os.Remove(temporary)
-	after, err := os.Lstat(exposed)
+	after, err := windowsMirrorPointerInfo(exposed)
 	if err != nil || !os.SameFile(before, after) {
 		return &mirrorAtomicPointerError{err: fmt.Errorf("mirror pointer changed during replacement")}
 	}
@@ -218,6 +221,18 @@ func createWindowsJunction(link, target string) error {
 	}
 	cleanup = false
 	return nil
+}
+
+func windowsMirrorPointerInfo(path string) (os.FileInfo, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	attributes, err := windows.GetFileAttributes(name)
+	if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 || attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return nil, fmt.Errorf("mirror pointer is not a directory reparse point")
+	}
+	return os.Lstat(path)
 }
 
 func normalizeWindowsJunctionTarget(target string) string {

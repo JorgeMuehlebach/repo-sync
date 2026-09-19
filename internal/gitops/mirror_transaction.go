@@ -404,26 +404,23 @@ func makeMirrorGenerationDurable(root string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("generation contains a special file")
 		}
-		file, err := securefile.OpenRegularNoFollow(path)
-		if err != nil {
-			return err
+		if err := securefile.SyncRegularNoFollow(path); err != nil {
+			return fmt.Errorf("sync generation file: %w", err)
 		}
-		syncErr := file.Sync()
-		closeErr := file.Close()
-		if syncErr != nil {
-			return syncErr
-		}
-		return closeErr
+		return nil
 	})
 	if err != nil {
 		return err
 	}
 	for index := len(directories) - 1; index >= 0; index-- {
 		if err := syncMirrorDirectory(directories[index]); err != nil {
-			return err
+			return fmt.Errorf("sync generation directory: %w", err)
 		}
 	}
-	return syncMirrorDirectory(filepath.Dir(root))
+	if err := syncMirrorDirectory(filepath.Dir(root)); err != nil {
+		return fmt.Errorf("sync generation parent: %w", err)
+	}
+	return nil
 }
 
 func sameMirrorPath(left, right string) bool {
