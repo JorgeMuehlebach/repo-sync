@@ -243,7 +243,7 @@ HTTPS authentication.
 
 `contextctl` receives an exact immutable tree, emits at most 1 MiB of strict JSON and no stderr, and runs under a 15-minute outer deadline. Unknown fields, duplicate JSON keys, path-bearing diagnostics, identity mismatches, inconsistent verdicts, and exit/report disagreements are rejected.
 
-Failures are recorded using bounded stable codes and repository-relative diagnostic paths. Native notifications are best-effort, time-bounded, and deduplicated; unavailable notification delivery is itself durable state and never changes the validation decision.
+Failures are recorded using bounded stable codes and repository-relative diagnostic paths. Native notifications are best-effort, time-bounded, and deduplicated; unavailable notification delivery is itself durable state and never changes the validation decision. A first fetch failure remains visible in durable status but does not notify, which avoids false alarms while networking is restored after resume. A second consecutive fetch failure notifies normally. Validation, promotion, publication, conflict, and safety failures still notify on their first occurrence.
 
 ## Development
 

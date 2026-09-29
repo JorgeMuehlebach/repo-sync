@@ -1530,6 +1530,83 @@ func TestFailureNotificationIsDeduplicatedAndUnavailableDeliveryIsDurable(t *tes
 	}
 }
 
+func TestFetchFailureNotificationWaitsForSecondConsecutiveCycle(t *testing.T) {
+	application, _ := testApplication(t)
+	application.reconcileRuntime = func(state.Repository, configuredRepository) error { return nil }
+	entry := config.StructuredRepository("mirror", "https://github.com/owner/repo/tree/main", config.ModePublish, "example.source")
+	if err := config.Save(application.configPath, config.Config{Interval: "5m", Repositories: []config.Repository{entry}}); err != nil {
+		t.Fatal(err)
+	}
+	machineState := state.New()
+	machineState.Repositories["mirror"] = state.Repository{
+		ID: "mirror", Mode: "publish", Path: canonicalTestPath(t, t.TempDir()),
+		ValidationRuntime: validStatusRuntime("example.source"),
+	}
+	if err := state.Save(application.statePath, machineState); err != nil {
+		t.Fatal(err)
+	}
+	notifier := &countingNotifier{delivery: notify.DeliverySent}
+	application.publisher = fetchFailureEngine{}
+	application.notifier = notifier
+
+	if err := application.syncAll(context.Background(), false, "mirror"); err == nil {
+		t.Fatal("first fetch failure unexpectedly succeeded")
+	}
+	first, err := state.Load(application.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notifier.calls != 0 || first.Repositories["mirror"].Failure == nil || first.Repositories["mirror"].Notification != (state.Notification{}) {
+		t.Fatalf("first fetch failure notification state = %#v, calls=%d", first.Repositories["mirror"], notifier.calls)
+	}
+
+	if err := application.syncAll(context.Background(), false, "mirror"); err == nil {
+		t.Fatal("second fetch failure unexpectedly succeeded")
+	}
+	second, err := state.Load(application.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notifier.calls != 1 || second.Repositories["mirror"].Notification.Status != string(notify.DeliverySent) {
+		t.Fatalf("second fetch failure notification state = %#v, calls=%d", second.Repositories["mirror"], notifier.calls)
+	}
+}
+
+func TestRecoveredFetchFailureNeverNotifies(t *testing.T) {
+	application, _ := testApplication(t)
+	application.reconcileRuntime = func(state.Repository, configuredRepository) error { return nil }
+	entry := config.StructuredRepository("mirror", "https://github.com/owner/repo/tree/main", config.ModePublish, "example.source")
+	if err := config.Save(application.configPath, config.Config{Interval: "5m", Repositories: []config.Repository{entry}}); err != nil {
+		t.Fatal(err)
+	}
+	machineState := state.New()
+	machineState.Repositories["mirror"] = state.Repository{
+		ID: "mirror", Mode: "publish", Path: canonicalTestPath(t, t.TempDir()),
+		ValidationRuntime: validStatusRuntime("example.source"),
+	}
+	if err := state.Save(application.statePath, machineState); err != nil {
+		t.Fatal(err)
+	}
+	notifier := &countingNotifier{delivery: notify.DeliverySent}
+	application.publisher = fetchFailureEngine{}
+	application.notifier = notifier
+	if err := application.syncAll(context.Background(), false, "mirror"); err == nil {
+		t.Fatal("fetch failure unexpectedly succeeded")
+	}
+
+	application.publisher = &recordingEngine{}
+	if err := application.syncAll(context.Background(), false, "mirror"); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := state.Load(application.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notifier.calls != 0 || updated.Repositories["mirror"].Failure != nil || updated.Repositories["mirror"].Notification != (state.Notification{}) {
+		t.Fatalf("recovered fetch failure state = %#v, calls=%d", updated.Repositories["mirror"], notifier.calls)
+	}
+}
+
 func TestStalePendingNotificationIsRetriedWithNewVersion(t *testing.T) {
 	application, _ := testApplication(t)
 	entry := config.StructuredRepository("mirror", "https://github.com/owner/repo/tree/main", config.ModePublish, "example.source")
@@ -1658,6 +1735,12 @@ func (staticFailureEngine) Sync(context.Context, gitops.Target) (gitops.Outcome,
 		Code: "REPO-VALIDATION-FAILED", Phase: "validation", Summary: "candidate context validation failed",
 		Findings: []validation.Finding{{CheckID: "CTX-SCHEMA-FAIL", Path: "skills/example/SKILL.md"}},
 	}
+}
+
+type fetchFailureEngine struct{}
+
+func (fetchFailureEngine) Sync(context.Context, gitops.Target) (gitops.Outcome, *gitops.OperationError) {
+	return gitops.Outcome{}, &gitops.OperationError{Code: "REPO-FETCH-FAILED", Phase: "fetch", Summary: "fetch failed"}
 }
 
 type transactionalMirrorFake struct {
