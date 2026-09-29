@@ -1514,6 +1514,7 @@ func validateStoredRuntime(repositoryState state.Repository, repository configur
 
 func (a *Application) recordFailure(repository configuredRepository, repoState state.Repository, expectedPresent bool, outcome gitops.Outcome, failure *gitops.OperationError) error {
 	now := a.now().UTC()
+	previousFailure := repoState.Failure
 	repoState.ID = repository.ID
 	repoState.Mode = string(repository.Config.EffectiveMode())
 	repoState.LastAttempt = now
@@ -1533,9 +1534,17 @@ func (a *Application) recordFailure(repository configuredRepository, repoState s
 	}
 	repoState.Failure = &state.Failure{Code: failure.Code, Phase: failure.Phase, Summary: failure.Summary, OccurredAt: now, Findings: findings}
 	fingerprint := failureFingerprint(repository.ID, failure, outcome.CandidateCommit, outcome.CandidateTree)
-	shouldNotify := repoState.Notification.FailureKey != fingerprint ||
-		(repoState.Notification.Status == "pending" && (repoState.Notification.AttemptedAt.IsZero() || now.Sub(repoState.Notification.AttemptedAt) >= notificationPendingRetry))
+	deferNotification := shouldDeferFetchFailureNotification(previousFailure, failure)
+	shouldNotify := !deferNotification && (repoState.Notification.FailureKey != fingerprint ||
+		(repoState.Notification.Status == "pending" && (repoState.Notification.AttemptedAt.IsZero() || now.Sub(repoState.Notification.AttemptedAt) >= notificationPendingRetry)))
 	notificationVersion := repoState.Notification.Version
+	if deferNotification {
+		// Fetches commonly race network restoration after a suspended computer
+		// resumes. Keep the failure durable, but wait for the next consecutive
+		// failed cycle before interrupting the user. Any successful cycle clears
+		// this state through recordSuccess.
+		repoState.Notification = state.Notification{}
+	}
 	if shouldNotify {
 		if notificationVersion == ^uint64(0) {
 			return fmt.Errorf("notification version exhausted")
@@ -1561,6 +1570,13 @@ func (a *Application) recordFailure(repository configuredRepository, repoState s
 	}
 	_, statusErr := a.refreshContextStatus("")
 	return errors.Join(deliveryErr, statusErr)
+}
+
+func shouldDeferFetchFailureNotification(previous *state.Failure, current *gitops.OperationError) bool {
+	if current == nil || current.Code != "REPO-FETCH-FAILED" || current.Phase != "fetch" {
+		return false
+	}
+	return previous == nil || previous.Code != current.Code || previous.Phase != current.Phase
 }
 
 // recordOperationLockFailure deliberately leaves the repository revision
