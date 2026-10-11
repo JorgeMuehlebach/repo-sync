@@ -8,8 +8,10 @@ import (
 	"testing"
 )
 
-func validMaintenanceReport(command string) MaintenanceReport {
-	return MaintenanceReport{
+func validMaintenanceReport(t *testing.T, command string) MaintenanceReport {
+	t.Helper()
+	root := t.TempDir()
+	report := MaintenanceReport{
 		SchemaVersion:    ReportSchemaVersion,
 		Protocol:         ReportProtocol,
 		ContractVersion:  "2.1.0",
@@ -20,9 +22,13 @@ func validMaintenanceReport(command string) MaintenanceReport {
 		ValidatorResults: []ValidatorResult{},
 		LinkActions: []LinkAction{{
 			Action: "noop", Ownership: "managed", SkillName: "context-system", SourceID: "example.context",
-			LinkPath: filepath.Join(string(filepath.Separator), "managed", "context-system"), TargetPath: filepath.Join(string(filepath.Separator), "mirror", "context-system"),
+			LinkPath: filepath.Join(root, "managed", "context-system"), TargetPath: filepath.Join(root, "mirror", "context-system"),
 		}},
 	}
+	if !filepath.IsAbs(report.LinkActions[0].LinkPath) || !filepath.IsAbs(report.LinkActions[0].TargetPath) {
+		t.Fatalf("maintenance report fixture paths must be absolute: %#v", report.LinkActions[0])
+	}
+	return report
 }
 
 func maintenanceRequest(t *testing.T) MaintenanceRequest {
@@ -37,7 +43,7 @@ func maintenanceRequest(t *testing.T) MaintenanceRequest {
 
 func TestMaintenanceRunnerUsesFixedAddOnlyInterfaceAndSuppressesChildOutput(t *testing.T) {
 	request := maintenanceRequest(t)
-	report := validMaintenanceReport("links-apply")
+	report := validMaintenanceReport(t, "links-apply")
 	raw, err := json.Marshal(report)
 	if err != nil {
 		t.Fatal(err)
@@ -62,17 +68,17 @@ func TestMaintenanceRunnerUsesFixedAddOnlyInterfaceAndSuppressesChildOutput(t *t
 
 func TestMaintenanceRunnerRejectsMalformedUnsafeAndExitMismatchedReports(t *testing.T) {
 	request := maintenanceRequest(t)
-	unsafe := validMaintenanceReport("links-apply")
+	unsafe := validMaintenanceReport(t, "links-apply")
 	unsafe.LinkActions[0].Action = "remove"
 	unsafeRaw, _ := json.Marshal(unsafe)
-	heldWithAction := validMaintenanceReport("links-apply")
+	heldWithAction := validMaintenanceReport(t, "links-apply")
 	heldWithAction.Verdict = VerdictHold
 	heldWithAction.Checks[0].Status = "hold"
 	heldWithActionRaw, _ := json.Marshal(heldWithAction)
-	missingTarget := validMaintenanceReport("links-apply")
+	missingTarget := validMaintenanceReport(t, "links-apply")
 	missingTarget.LinkActions[0].TargetPath = ""
 	missingTargetRaw, _ := json.Marshal(missingTarget)
-	mismatch := validMaintenanceReport("links-apply")
+	mismatch := validMaintenanceReport(t, "links-apply")
 	mismatchRaw, _ := json.Marshal(mismatch)
 	for name, test := range map[string]struct {
 		executor *fakeExecutor
@@ -96,7 +102,7 @@ func TestMaintenanceRunnerRejectsMalformedUnsafeAndExitMismatchedReports(t *test
 
 func TestMaintenanceRunnerAcceptsNoopPlanAndCurrentMinor(t *testing.T) {
 	request := maintenanceRequest(t)
-	report := validMaintenanceReport("links-plan")
+	report := validMaintenanceReport(t, "links-plan")
 	raw, _ := json.Marshal(report)
 	executor := &fakeExecutor{raw: raw}
 	if _, err := (MaintenanceRunner{Executor: executor}).PlanManagedSkillLinks(context.Background(), request); err != nil {
