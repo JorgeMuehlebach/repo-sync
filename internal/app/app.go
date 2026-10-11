@@ -71,6 +71,7 @@ type Application struct {
 	publisher      gitops.Engine
 	mirror         gitops.Engine
 	validator      validation.Validator
+	maintainer     validation.Maintainer
 	notifier       notify.Notifier
 	now            func() time.Time
 	serviceFactory func() (background.Controller, error)
@@ -215,6 +216,7 @@ func New(version string, in io.Reader, out, errOut io.Writer) (*Application, err
 		lockDir:    filepath.Join(dir, "locks"),
 		homeDir:    home,
 		validator:  validation.Runner{},
+		maintainer: validation.MaintenanceRunner{},
 		notifier:   notify.NewNative(),
 		now:        time.Now,
 	}, nil
@@ -223,6 +225,9 @@ func New(version string, in io.Reader, out, errOut io.Writer) (*Application, err
 func (a *Application) defaults() {
 	if a.validator == nil {
 		a.validator = validation.Unavailable{}
+	}
+	if a.maintainer == nil {
+		a.maintainer = validation.MaintenanceRunner{}
 	}
 	if a.notifier == nil {
 		a.notifier = notify.NewNative()
@@ -269,6 +274,8 @@ func (a *Application) Run(args []string) error {
 			return err
 		}
 		return a.syncAll(context.Background(), true, selector)
+	case "maintenance":
+		return a.maintenanceCommand(context.Background(), args[1:])
 	case "config":
 		return a.configCommand(args[1:])
 	case "run":
@@ -283,10 +290,12 @@ func (a *Application) printUsage() {
 
 Usage:
   repo-sync setup [--repository <id>] [--path <path>] [validation options]
+  repo-sync setup --refresh-validation [validation options]
   repo-sync start
   repo-sync stop
   repo-sync status [--repository <id>] [--json]
   repo-sync sync [--repository <id>]
+  repo-sync maintenance enable|disable
   repo-sync uninstall
   repo-sync config add <branch-url> [--id <id> --mode <publish|mirror> --source <source-id>]
   repo-sync config remove <branch-url-or-id>
@@ -488,16 +497,25 @@ func (a *Application) configCommand(args []string) error {
 }
 
 type setupOptions struct {
-	RepositoryID string
-	Path         string
-	Contextctl   string
-	Registry     string
-	TrustState   string
+	RepositoryID      string
+	Path              string
+	Contextctl        string
+	Registry          string
+	TrustState        string
+	RefreshValidation bool
 }
 
 func parseSetupOptions(args []string) (setupOptions, error) {
 	var options setupOptions
 	for len(args) > 0 {
+		if args[0] == "--refresh-validation" {
+			if options.RefreshValidation {
+				return setupOptions{}, fmt.Errorf("setup option --refresh-validation was supplied more than once")
+			}
+			options.RefreshValidation = true
+			args = args[1:]
+			continue
+		}
 		if len(args) < 2 {
 			return setupOptions{}, fmt.Errorf("setup option %s requires a value", args[0])
 		}
@@ -519,6 +537,12 @@ func parseSetupOptions(args []string) (setupOptions, error) {
 	}
 	if options.Path != "" && options.RepositoryID == "" {
 		return setupOptions{}, fmt.Errorf("--path requires --repository")
+	}
+	if options.RefreshValidation && (options.RepositoryID != "" || options.Path != "") {
+		return setupOptions{}, fmt.Errorf("--refresh-validation cannot be combined with --repository or --path")
+	}
+	if options.RefreshValidation {
+		return options, nil
 	}
 	if options.Registry == "" {
 		return setupOptions{}, fmt.Errorf("--registry is required so Repo Sync can use the pinned Git executable")
@@ -584,6 +608,9 @@ func parseConfigAddOptions(args []string) (string, string, string, error) {
 }
 
 func (a *Application) setup(ctx context.Context, options setupOptions) error {
+	if options.RefreshValidation {
+		return a.refreshValidationSetup(ctx, options)
+	}
 	_, _, _, registryData, err := stableRuntimeFile(options.Registry, "", true, maxRuntimeJSONBytes)
 	if err != nil {
 		return fmt.Errorf("registry path is not a canonical regular file: %w", err)
@@ -1029,7 +1056,11 @@ func readContextContractVersion(data []byte) (string, error) {
 
 func supportedContextContract(value string) bool {
 	match := statusSemverPattern.FindStringSubmatch(value)
-	return len(match) >= 3 && match[1] == "2" && match[2] == "0"
+	if len(match) < 3 || match[1] != "2" {
+		return false
+	}
+	minor, err := strconv.Atoi(match[2])
+	return err == nil && minor <= 1
 }
 
 func pathWithin(path, root string) bool {
@@ -1402,7 +1433,11 @@ func (a *Application) syncAll(ctx context.Context, printProgress bool, selector 
 			fmt.Fprintln(a.out, "  up to date")
 		}
 	}
-	return errors.Join(failures...)
+	cycleErr := errors.Join(failures...)
+	if cycleErr == nil && selector == "" {
+		a.runManagedSkillMaintenance(ctx)
+	}
+	return cycleErr
 }
 
 func repositoryState(machineState state.State, repository configuredRepository) (state.Repository, bool) {
@@ -2027,6 +2062,14 @@ func (a *Application) status(options statusOptions) error {
 	}
 
 	fmt.Fprintf(a.out, "Service: %s\nEnabled: %t\nInterval: %s\nConfig: %s\n", serviceState, machineState.Enabled, cfg.Interval, a.configPath)
+	maintenanceState := "disabled"
+	if machineState.ManagedSkillLinks {
+		maintenanceState = "healthy"
+		if machineState.Maintenance.Failure != nil {
+			maintenanceState = "requires attention (" + machineState.Maintenance.Failure.Code + ")"
+		}
+	}
+	fmt.Fprintf(a.out, "Managed skill links: %s\n", maintenanceState)
 	for _, repository := range repositories {
 		repoState, ok := machineState.Repositories[repository.ID]
 		if !ok && repository.Config.IsLegacy() {

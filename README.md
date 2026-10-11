@@ -38,7 +38,7 @@ On Windows, Repo Sync copies an existing `config.yaml` and `state.json` from
 `%AppData%\repo-sync` the first time the stable location is used. Existing files
 in the stable location win, and the legacy files remain available for rollback.
 
-`config.yaml` is portable configuration. `state.json` contains machine-local checkout paths, pinned validator identities, and operational state. Its private Repo Sync schema is independent of the shared context contract. `context-status.json` is an atomically maintained, bounded, sanitized schema-2 `repo-sync.context-status.v2` document for Context Doctor. It contains no checkout path, executable path, remote URL, hostname, username, command output, or notification text.
+`config.yaml` is portable configuration. `state.json` contains machine-local checkout paths, pinned validator identities, operational state, and the opt-in `managed_skill_links` maintenance policy. Its private Repo Sync schema is independent of the shared context contract. `context-status.json` is an atomically maintained, bounded, sanitized schema-2 `repo-sync.context-status.v2` document for Context Doctor. It contains no checkout path, executable path, remote URL, hostname, username, command output, or notification text.
 
 The service refreshes `context-status.json` every 30 seconds independently of the synchronization interval. Its `generated_at` value lets consumers treat a formerly running but crashed service as stale. Writers use an operating-system file lock, so the CLI and service cannot race each other. Repo Sync withholds a refresh if any configured repository is not reconciled instead of publishing a deceptively healthy partial document.
 
@@ -114,7 +114,7 @@ repo-sync config add https://github.com/example/bird-deter/tree/main \
   --source example.bird-deter-context
 ```
 
-Every setup invocation requires the v2 machine registry because Repo Sync uses
+Every targeted setup invocation requires the v2 machine registry because Repo Sync uses
 the registry-pinned Git executable and never falls back to inherited `PATH`.
 For a new mirror, bootstrap its stable pointer before registering the source:
 
@@ -148,8 +148,8 @@ repo-sync setup \
   --trust-state /absolute/path/to/trusted-validator-state.json
 ```
 
-`--contextctl` and `--trust-state` are supplied together; `--registry` is always
-required. The configured `contextctl` executable must be a canonical regular
+For targeted setup, `--contextctl` and `--trust-state` are supplied together;
+`--registry` is always required. The configured `contextctl` executable must be a canonical regular
 executable outside the source checkout. Repo Sync pins SHA-256 identities for
 it, the registry, and trusted-validator state; registry and trust-state files
 are size-bounded and parsed as data. The bootstrap/full-setup split is required
@@ -163,8 +163,30 @@ Publisher manifests require publication mode `repo-sync`; mirrors accept
 `repo-sync` or `manual-review`. Repository ID, `origin`, GitHub remote, branch,
 source ID, and `.agents/context-source.yaml` publication metadata must agree.
 Start and every synchronization recheck the same relationships and pinned
-files. Legacy v1 context handshakes require migration; Repo Sync supports only
-contract `2.0.x`.
+files. Legacy v1 context handshakes require migration; Repo Sync accepts stable
+schema-2 context contracts through `2.1.x`, including existing `2.0.x` state.
+
+For an approved dependency upgrade, stop Repo Sync before changing installed
+binaries or registry pins, then refresh every configured validation binding
+without rediscovering repositories or synchronizing Git:
+
+```sh
+repo-sync stop
+contextctl dependencies update --codex-executable /absolute/path/to/approved/codex --format json
+repo-sync setup --refresh-validation \
+  --contextctl /absolute/path/to/contextctl \
+  --registry /absolute/path/to/machine-registry.json \
+  --trust-state /absolute/path/to/trusted-validator-state.json
+repo-sync status
+repo-sync start
+```
+
+The service must be stopped. The refresh stages all configured source roots and
+then updates machine state once, so a failure leaves the previous bindings in
+place. Omitted dependency flags reuse each repository's current pinned path;
+provide explicit paths when an executable, registry, or trust-state dependency
+has moved or changed. The command performs no filesystem discovery, fetch,
+publication, or link maintenance.
 
 Without `--path`, publisher setup searches the user's home directory plus
 optional `search_roots`; mirror setup prompts for its stable pointer path. If
@@ -188,6 +210,7 @@ repo-sync start
 repo-sync stop
 repo-sync status [--repository <id>] [--json]
 repo-sync sync [--repository <id>]
+repo-sync maintenance enable|disable
 repo-sync uninstall
 repo-sync config add <branch-url> --id <id> --mode <publish|mirror> --source <source-id>
 repo-sync config remove <branch-url-or-id>
@@ -196,6 +219,28 @@ repo-sync version
 ```
 
 `status --json` renders the same full sanitized model maintained in `context-status.json`; a repository selector filters only the command's output, not the persistent full snapshot. `uninstall` removes the service and preserves configuration and state.
+
+Managed skill-link maintenance is disabled by default. Enable it only after the
+Contextctl `2.1` dependency refresh and a healthy full synchronization:
+
+```sh
+repo-sync maintenance enable
+```
+
+Enablement runs a read-only `links plan --add-only` preflight through the pinned
+Contextctl executable and refuses unsafe aggregate or ledger state. After each
+successful full synchronization cycle, Repo Sync publishes and reopens the
+complete shared status, verifies that every enrolled repository has a passing
+accepted commit/tree and one common pinned Contextctl/registry/trust runtime,
+then runs the fixed `links apply --add-only` protocol. Only managed `create` and
+`noop` actions are accepted. Targeted `sync --repository` commands never run
+global maintenance; the next successful full cycle reconciles it.
+
+Healthy and metadata-only reconciliations stay quiet. A held, unsafe, malformed,
+or failed maintenance report is recorded separately from repository health and
+emits one deduplicated native notification. It does not roll back accepted
+mirrors or turn an otherwise successful synchronization into a source failure.
+Disable the policy with `repo-sync maintenance disable`.
 
 ## Safety model
 
@@ -241,7 +286,7 @@ repositories. Repository-local and worktree credential helpers are rejected,
 while machine-approved system/global credential helpers remain available for
 HTTPS authentication.
 
-`contextctl` receives an exact immutable tree, emits at most 1 MiB of strict JSON and no stderr, and runs under a 15-minute outer deadline. Unknown fields, duplicate JSON keys, path-bearing diagnostics, identity mismatches, inconsistent verdicts, and exit/report disagreements are rejected.
+`contextctl` receives an exact immutable tree, emits at most 1 MiB of strict JSON and no stderr, and runs under a 15-minute outer deadline. Managed link maintenance uses the same byte-verified runtime snapshot and isolated process path with a two-minute bound. Unknown fields, duplicate JSON keys, path-bearing diagnostics, identity mismatches, unsafe link actions, inconsistent verdicts, and exit/report disagreements are rejected.
 
 Failures are recorded using bounded stable codes and repository-relative diagnostic paths. Native notifications are best-effort, time-bounded, and deduplicated; unavailable notification delivery is itself durable state and never changes the validation decision.
 

@@ -69,7 +69,7 @@ func TestContextctlCLIThroughRunner(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Validate() failed: %v", err)
 		}
-		if report.SchemaVersion != ReportSchemaVersion || report.Protocol != ReportProtocol || report.ContractVersion != "2.0.0" || report.Command != "validate" {
+		if report.SchemaVersion != ReportSchemaVersion || report.Protocol != ReportProtocol || !compatibleContract(report.ContractVersion) || report.Command != "validate" {
 			t.Fatalf("unexpected report identity: %#v", report)
 		}
 		if report.Verdict != VerdictPass || !report.Promotable || report.Candidate.Kind != "git-tree" || report.Candidate.SourceID != integrationSourceID || report.Candidate.ObjectID != fixture.request.Tree {
@@ -125,6 +125,197 @@ func TestContextctlCLIThroughRunner(t *testing.T) {
 		assertSnapshotContextctlExecution(t, executor, contextctlPath)
 		fixture.assertUnchanged(t)
 	})
+}
+
+func TestContextctlManagedSkillMaintenanceThroughRunner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration fixture uses a POSIX stable mirror pointer")
+	}
+	contextSystemRoot := canonicalContextSystemRoot(t)
+	runtimeRoot := canonicalTempDir(t)
+	contextctlPath := buildContextctl(t, contextSystemRoot, runtimeRoot)
+	home := canonicalTempDir(t)
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "linux" {
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	}
+
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("Git is unavailable")
+	}
+	gitPath, err = filepath.EvalSymlinks(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitPath, err = filepath.Abs(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitBytes, err := os.ReadFile(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repositoryID := "integration-context-mirror"
+	sourceID := "example.integration.context"
+	mirrorParent := canonicalTempDir(t)
+	exposed := filepath.Join(mirrorParent, "mirror-current")
+	pointerDigest := sha256.Sum256([]byte(repositoryID + "\x00" + exposed))
+	generation := filepath.Join(mirrorParent, ".repo-sync-mirror-"+hex.EncodeToString(pointerDigest[:12]), "generations", "generation-0123456789abcdef0123456789abcdef")
+	if err := os.MkdirAll(filepath.Join(generation, ".agents", "skills", "integration-skill"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	manifest := map[string]any{
+		"schema_version": 2, "contract_version": "2.1.0", "source_id": sourceID,
+		"authority":                map[string]any{"kind": "generic", "domain": "context-system", "owns": []string{"Portable integration context"}, "excludes": []string{"Machine state"}},
+		"context_map":              "CONTEXT.md",
+		"skills":                   []any{map[string]any{"name": "integration-skill", "path": ".agents/skills/integration-skill", "activation": "automatic"}},
+		"allowed_machine_profiles": []string{"generic-only"}, "allowed_source_roles": []string{"writable", "context-mirror"}, "global_skill_source_roles": []string{"context-mirror"},
+		"validators":       []any{map[string]any{"contract_id": "llm-config.check-posix", "contract_version": "1.0.0", "platforms": []string{"macos", "linux"}}},
+		"publication":      map[string]any{"mode": "repo-sync", "canonical_branch": "main", "writable_roles": []string{"writable"}},
+		"harness_adapters": []any{}, "external_skill_dependencies": []any{},
+	}
+	writeMaintenanceIntegrationJSON(t, filepath.Join(generation, ".agents", "context-source.yaml"), manifest, 0o600)
+	if err := os.WriteFile(filepath.Join(generation, ".agents", "skills", "integration-skill", "SKILL.md"), []byte("---\nname: integration-skill\ndescription: Integration fixture.\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(generation, "CONTEXT.md"), []byte("# Integration context\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runMaintenanceIntegrationGit(t, gitPath, generation, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(generation, ".git", "repo-sync-generation.json"), []byte(`{"schema_version":1,"generation_id":"0123456789abcdef0123456789abcdef"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runMaintenanceIntegrationGit(t, gitPath, generation, "config", "user.name", "Context Integration")
+	runMaintenanceIntegrationGit(t, gitPath, generation, "config", "user.email", "context@example.invalid")
+	runMaintenanceIntegrationGit(t, gitPath, generation, "remote", "add", "origin", "https://example.invalid/context.git")
+	runMaintenanceIntegrationGit(t, gitPath, generation, "add", ".agents/context-source.yaml", ".agents/skills/integration-skill/SKILL.md", "CONTEXT.md")
+	runMaintenanceIntegrationGit(t, gitPath, generation, "commit", "-m", "fixture")
+	commit := strings.TrimSpace(runMaintenanceIntegrationGit(t, gitPath, generation, "rev-parse", "HEAD"))
+	tree := strings.TrimSpace(runMaintenanceIntegrationGit(t, gitPath, generation, "rev-parse", "HEAD^{tree}"))
+	if err := os.Symlink(generation, exposed); err != nil {
+		t.Fatal(err)
+	}
+
+	configRoot := filepath.Join(home, ".config")
+	if runtime.GOOS == "darwin" {
+		configRoot = filepath.Join(home, "Library", "Application Support")
+	}
+	contextRoot := filepath.Join(configRoot, "context-system")
+	aggregate := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(aggregate, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(contextRoot, "machine-registry.json")
+	trustPath := filepath.Join(contextRoot, "trusted-validator-state.json")
+	ledgerPath := filepath.Join(contextRoot, "managed-link-ledger.json")
+	if err := os.MkdirAll(contextRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registryValue := map[string]any{
+		"schema_version": 2, "contract_version": "2.1.0", "registry_revision": 1,
+		"machine": map[string]any{"id": "integration-machine", "profile": "generic-only", "os": platform},
+		"registrations": []any{map[string]any{
+			"source_id": sourceID, "role": "context-mirror", "enabled": true, "expose_global_skills": true,
+			"root_path": map[string]any{"style": "posix", "value": exposed},
+			"git":       map[string]any{"remote_name": "origin", "remote_url": "https://example.invalid/context.git", "branch": "main"},
+			"repo_sync": map[string]any{"repository_id": repositoryID, "mode": "mirror"},
+		}},
+		"local_dependencies": []any{map[string]any{
+			"id": "context-system.git", "kind": "executable", "path": map[string]any{"style": "posix", "value": gitPath},
+			"sha256": fmt.Sprintf("%x", sha256.Sum256(gitBytes)), "version": "integration",
+		}},
+		"connections": []any{},
+	}
+	registryBytes := writeMaintenanceIntegrationJSON(t, registryPath, registryValue, 0o600)
+	trustRoot := filepath.Join(contextRoot, "trusted")
+	if err := os.MkdirAll(trustRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	trustBytes := writeMaintenanceIntegrationJSON(t, trustPath, map[string]any{
+		"schema_version": 2, "contract_version": "2.1.0", "state_revision": 1, "machine_id": "integration-machine",
+		"trust_root": map[string]any{"style": "posix", "value": trustRoot}, "approvals": []any{},
+	}, 0o600)
+	writeMaintenanceIntegrationJSON(t, ledgerPath, map[string]any{
+		"schema_version": 2, "contract_version": "2.1.0", "ledger_revision": 1, "machine_id": "integration-machine",
+		"aggregate_root": map[string]any{"style": "posix", "value": aggregate}, "entries": []any{}, "legacy_adoptions": []any{},
+	}, 0o600)
+	contextctlBytes, err := os.ReadFile(contextctlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protocolDigest := func(data []byte) string { return "sha256:" + digestIntegrationBytes(data) }
+	statusPath := filepath.Join(runtimeRoot, "context-status.json")
+	writeMaintenanceIntegrationJSON(t, statusPath, map[string]any{
+		"schema_version": 2, "protocol": "repo-sync.context-status.v2", "generated_at": time.Now().UTC().Format(time.RFC3339),
+		"service": map[string]any{"state": "running", "enabled": true, "interval_seconds": 300},
+		"repositories": []any{map[string]any{
+			"repository_id": repositoryID, "mode": "mirror", "branch": "main", "last_attempt_at": time.Now().UTC().Format(time.RFC3339), "last_success_at": time.Now().UTC().Format(time.RFC3339), "accepted_commit": commit,
+			"validation_config": map[string]any{
+				"protocol": ReportProtocol, "source_id": sourceID, "contextctl_binary_digest": protocolDigest(contextctlBytes),
+				"registry_revision": 1, "registry_digest": protocolDigest(registryBytes), "trust_state_revision": 1, "trust_state_digest": protocolDigest(trustBytes),
+			},
+			"last_validation": map[string]any{
+				"contract_version": "2.1.0", "tree_object_id": tree, "verdict": "pass", "check_ids": []string{"CTX-VALIDATOR-BUILTIN-PASS"},
+				"validator_results": []any{map[string]any{"contract_id": "llm-config.check-posix", "contract_version": "1.0.0", "disposition": "pass", "check_ids": []string{"CTX-VALIDATOR-BUILTIN-PASS"}}},
+			},
+		}},
+	}, 0o600)
+
+	request := MaintenanceRequest{
+		Runtime: Runtime{
+			ContextctlPath: contextctlPath, ContextctlDigest: protocolDigest(contextctlBytes),
+			RegistryPath: registryPath, RegistryDigest: protocolDigest(registryBytes),
+			TrustStatePath: trustPath, TrustStateDigest: protocolDigest(trustBytes),
+		},
+		RepositoryPaths: []string{exposed}, StatusPath: statusPath,
+	}
+	report, err := (MaintenanceRunner{Timeout: 30 * time.Second}).ApplyManagedSkillLinks(context.Background(), request)
+	if err != nil {
+		t.Fatalf("ApplyManagedSkillLinks() failed: %v", err)
+	}
+	if report.Command != "links-apply" || report.Verdict != VerdictPass || len(report.LinkActions) != 1 || report.LinkActions[0].Action != "create" {
+		t.Fatalf("unexpected maintenance report: %#v", report)
+	}
+	linkPath := filepath.Join(aggregate, "integration-skill")
+	target, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("managed skill link was not created: %v", err)
+	}
+	if target != filepath.Join(exposed, ".agents", "skills", "integration-skill") {
+		t.Fatalf("managed skill target = %q", target)
+	}
+	second, err := (MaintenanceRunner{Timeout: 30 * time.Second}).ApplyManagedSkillLinks(context.Background(), request)
+	if err != nil || second.Verdict != VerdictPass || len(second.LinkActions) != 1 || second.LinkActions[0].Action != "noop" {
+		t.Fatalf("idempotent maintenance = %#v, %v", second, err)
+	}
+}
+
+func writeMaintenanceIntegrationJSON(t *testing.T, path string, value any, mode os.FileMode) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, mode); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func runMaintenanceIntegrationGit(t *testing.T, gitPath, directory string, args ...string) string {
+	t.Helper()
+	command := exec.Command(gitPath, append([]string{"-C", directory}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v: %s", args, err, output)
+	}
+	return string(output)
 }
 
 func canonicalContextSystemRoot(t *testing.T) string {

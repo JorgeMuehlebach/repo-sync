@@ -135,14 +135,14 @@ func TestNormalizeRejectsUnsafeFindingPath(t *testing.T) {
 
 func TestNormalizeAcceptsCurrentContractPatchAndRejectsIncompatibleVersions(t *testing.T) {
 	request := testRequest(t)
-	for _, version := range []string{"2.0.0", "2.0.9"} {
+	for _, version := range []string{"2.0.0", "2.0.9", "2.1.0", "2.1.9"} {
 		report := validReport(request.Runtime.SourceID, request.Tree)
 		report.ContractVersion = version
 		if err := Normalize(&report, request); err != nil {
 			t.Fatalf("Normalize(%s): %v", version, err)
 		}
 	}
-	for _, version := range []string{"1.2.0", "2.1.0", "3.0.0", "2.0.0-rc.1", "2.0.0+build"} {
+	for _, version := range []string{"1.2.0", "2.2.0", "3.0.0", "2.0.0-rc.1", "2.0.0+build"} {
 		report := validReport(request.Runtime.SourceID, request.Tree)
 		report.ContractVersion = version
 		if err := Normalize(&report, request); err == nil {
@@ -216,7 +216,7 @@ func TestRunnerClassifiesContractFamiliesExactly(t *testing.T) {
 		"v1 contract on v2":        {raw: mutate(map[string]any{"contract_version": "1.9.0"}), code: CodeUnsupported},
 		"future schema":            {raw: mutate(map[string]any{"schema_version": 3}), code: CodeUnsupported},
 		"future protocol":          {raw: mutate(map[string]any{"protocol": "contextctl.report.v3"}), code: CodeUnsupported},
-		"future contract":          {raw: mutate(map[string]any{"contract_version": "2.1.0"}), code: CodeUnsupported},
+		"future contract":          {raw: mutate(map[string]any{"contract_version": "2.2.0"}), code: CodeUnsupported},
 		"prerelease contract":      {raw: mutate(map[string]any{"contract_version": "2.0.0-rc.1"}), code: CodeUnsupported},
 		"build contract":           {raw: mutate(map[string]any{"contract_version": "2.0.0+build"}), code: CodeUnsupported},
 		"malformed":                {raw: []byte(`{"schema_version":`), code: CodeUnsupported},

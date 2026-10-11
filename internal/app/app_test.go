@@ -248,6 +248,7 @@ func TestTargetedSyncTouchesOnlySelectedRepository(t *testing.T) {
 	}
 	runtimeState := validStatusRuntime("first.context")
 	machineState := state.New()
+	machineState.ManagedSkillLinks = true
 	machineState.Repositories["first"] = state.Repository{ID: "first", Mode: "publish", Path: canonicalTestPath(t, t.TempDir()), ValidationRuntime: runtimeState}
 	runtimeState = validStatusRuntime("second.context")
 	machineState.Repositories["second"] = state.Repository{ID: "second", Mode: "publish", Path: canonicalTestPath(t, t.TempDir()), ValidationRuntime: runtimeState}
@@ -257,11 +258,16 @@ func TestTargetedSyncTouchesOnlySelectedRepository(t *testing.T) {
 	engine := &recordingEngine{}
 	application.publisher = engine
 	application.mirror = engine
+	maintainer := &fakeMaintainer{applyReport: appMaintenanceReport(validation.VerdictPass)}
+	application.maintainer = maintainer
 	if err := application.Run([]string{"sync", "--repository", "second"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(engine.targets) != 1 || engine.targets[0].ID != "second" {
 		t.Fatalf("sync targets = %#v", engine.targets)
+	}
+	if maintainer.applyCalls != 0 {
+		t.Fatalf("targeted sync ran global maintenance %d times", maintainer.applyCalls)
 	}
 }
 

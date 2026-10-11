@@ -35,15 +35,16 @@ const (
 	ReportSchemaVersion = 2
 	ReportProtocol      = "contextctl.report.v2"
 
-	CodeUnavailable     = "CTX-VALIDATOR-UNAVAILABLE"
-	CodeUnsupported     = "CTX-CONTRACT-UNSUPPORTED"
-	CodeInvalidReport   = CodeUnsupported // retained as a source-compatible alias
-	CodeBundleChanged   = "CTX-VALIDATOR-BUNDLE-CHANGED"
-	CodeTrustTamper     = "CTX-VALIDATOR-TRUST-TAMPER"
-	CodeMigrationNeeded = "CTX-MIGRATION-REQUIRED"
-	maxOutputBytes      = 1 << 20
-	maxContextctlBytes  = 128 << 20
-	maxRuntimeJSONBytes = 4 << 20
+	CodeUnavailable       = "CTX-VALIDATOR-UNAVAILABLE"
+	CodeUnsupported       = "CTX-CONTRACT-UNSUPPORTED"
+	CodeInvalidReport     = CodeUnsupported // retained as a source-compatible alias
+	CodeBundleChanged     = "CTX-VALIDATOR-BUNDLE-CHANGED"
+	CodeTrustTamper       = "CTX-VALIDATOR-TRUST-TAMPER"
+	CodeMigrationNeeded   = "CTX-MIGRATION-REQUIRED"
+	CodeMaintenanceUnsafe = "CTX-LINK-UNSAFE-PLAN"
+	maxOutputBytes        = 1 << 20
+	maxContextctlBytes    = 128 << 20
+	maxRuntimeJSONBytes   = 4 << 20
 	// contextctl's frozen 840-second validator budget leaves one bounded minute
 	// for startup, generic checks, serialization, and termination.
 	defaultTimeout = 15 * time.Minute
@@ -493,7 +494,7 @@ func classifyReportIdentity(data []byte) (reportFamily, error) {
 		return 0, &ProtocolError{Code: CodeUnsupported}
 	}
 	major, minor, ok := contractVersion(identity.ContractVersion)
-	if !ok || major != 2 || minor != 0 {
+	if !ok || major != 2 || minor > 1 {
 		return 0, &ProtocolError{Code: CodeUnsupported}
 	}
 	return reportFamilyCurrent, nil
@@ -621,7 +622,7 @@ func rawBoolean(value json.RawMessage) bool {
 
 func compatibleContract(value string) bool {
 	major, minor, ok := contractVersion(value)
-	return ok && major == 2 && minor == 0
+	return ok && major == 2 && minor <= 1
 }
 
 func contractVersion(value string) (int, int, bool) {
