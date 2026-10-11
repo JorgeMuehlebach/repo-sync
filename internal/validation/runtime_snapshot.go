@@ -32,7 +32,11 @@ type runtimeArtifact struct {
 }
 
 func prepareRuntime(ctx context.Context, request Request) (preparedRuntime, error) {
-	parent := filepath.Dir(request.Runtime.RegistryPath)
+	return prepareRuntimeArtifacts(ctx, request.Runtime, []string{request.SourceRoot, request.RepositoryPath})
+}
+
+func prepareRuntimeArtifacts(ctx context.Context, runtimeState Runtime, protectedPaths []string) (preparedRuntime, error) {
+	parent := filepath.Dir(runtimeState.RegistryPath)
 	if _, err := securefile.VerifyDirectoryNoReparse(parent); err != nil {
 		return preparedRuntime{}, &ProtocolError{Code: CodeUnavailable}
 	}
@@ -44,7 +48,14 @@ func prepareRuntime(ctx context.Context, request Request) (preparedRuntime, erro
 	if canonicalErr == nil {
 		canonicalRoot, canonicalErr = filepath.Abs(canonicalRoot)
 	}
-	if canonicalErr != nil || filepath.Clean(canonicalRoot) != canonicalRoot || pathsOverlap(canonicalRoot, request.SourceRoot) || pathsOverlap(canonicalRoot, request.RepositoryPath) || os.Chmod(canonicalRoot, 0o700) != nil {
+	overlapsProtectedPath := false
+	for _, protectedPath := range protectedPaths {
+		if protectedPath == "" || pathsOverlap(canonicalRoot, protectedPath) {
+			overlapsProtectedPath = true
+			break
+		}
+	}
+	if canonicalErr != nil || filepath.Clean(canonicalRoot) != canonicalRoot || overlapsProtectedPath || os.Chmod(canonicalRoot, 0o700) != nil {
 		_ = os.RemoveAll(root)
 		return preparedRuntime{}, &ProtocolError{Code: CodeUnavailable}
 	}
@@ -57,15 +68,15 @@ func prepareRuntime(ctx context.Context, request Request) (preparedRuntime, erro
 	if runtime.GOOS == "windows" {
 		contextctlName += ".exe"
 	}
-	prepared.contextctl, err = createRuntimeSnapshot(ctx, request.Runtime.ContextctlPath, filepath.Join(canonicalRoot, contextctlName), request.Runtime.ContextctlDigest, maxContextctlBytes, true, request.SourceRoot, request.RepositoryPath)
+	prepared.contextctl, err = createRuntimeSnapshot(ctx, runtimeState.ContextctlPath, filepath.Join(canonicalRoot, contextctlName), runtimeState.ContextctlDigest, maxContextctlBytes, true, protectedPaths...)
 	if err != nil {
 		return fail(CodeUnavailable)
 	}
-	prepared.registry, err = createRuntimeSnapshot(ctx, request.Runtime.RegistryPath, filepath.Join(canonicalRoot, "registry.json"), request.Runtime.RegistryDigest, maxRuntimeJSONBytes, false, request.SourceRoot, request.RepositoryPath)
+	prepared.registry, err = createRuntimeSnapshot(ctx, runtimeState.RegistryPath, filepath.Join(canonicalRoot, "registry.json"), runtimeState.RegistryDigest, maxRuntimeJSONBytes, false, protectedPaths...)
 	if err != nil {
 		return fail(CodeUnavailable)
 	}
-	prepared.trustState, err = createRuntimeSnapshot(ctx, request.Runtime.TrustStatePath, filepath.Join(canonicalRoot, "trust-state.json"), request.Runtime.TrustStateDigest, maxRuntimeJSONBytes, false, request.SourceRoot, request.RepositoryPath)
+	prepared.trustState, err = createRuntimeSnapshot(ctx, runtimeState.TrustStatePath, filepath.Join(canonicalRoot, "trust-state.json"), runtimeState.TrustStateDigest, maxRuntimeJSONBytes, false, protectedPaths...)
 	if err != nil {
 		return fail(CodeTrustTamper)
 	}

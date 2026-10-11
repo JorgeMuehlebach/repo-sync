@@ -68,6 +68,17 @@ type Notification struct {
 	Version     uint64    `json:"version,omitempty"`
 }
 
+// Maintenance records the independent health of optional machine-local
+// housekeeping. It must never be folded into a repository's synchronization
+// result because a healthy accepted source remains healthy when housekeeping
+// needs operator attention.
+type Maintenance struct {
+	LastAttempt  time.Time    `json:"last_attempt,omitempty"`
+	LastSuccess  time.Time    `json:"last_success,omitempty"`
+	Failure      *Failure     `json:"failure,omitempty"`
+	Notification Notification `json:"notification,omitempty"`
+}
+
 // PendingCompletion is private crash-recovery evidence for a Git side effect
 // that has not yet crossed the reopened shared-status completion barrier.
 // Ordinary status writers must never expose these identities.
@@ -101,9 +112,11 @@ type Repository struct {
 }
 
 type State struct {
-	SchemaVersion int                   `json:"schema_version,omitempty"`
-	Enabled       bool                  `json:"enabled"`
-	Repositories  map[string]Repository `json:"repositories"`
+	SchemaVersion     int                   `json:"schema_version,omitempty"`
+	Enabled           bool                  `json:"enabled"`
+	ManagedSkillLinks bool                  `json:"managed_skill_links,omitempty"`
+	Maintenance       Maintenance           `json:"maintenance,omitempty"`
+	Repositories      map[string]Repository `json:"repositories"`
 }
 
 // State's schema is private Repo Sync persistence and is intentionally
