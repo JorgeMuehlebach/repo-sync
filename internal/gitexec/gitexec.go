@@ -69,7 +69,7 @@ func DependencyFromRegistry(data []byte) (Dependency, error) {
 	if err := strictjson.Decode(data, &document, false); err != nil {
 		return Dependency{}, errors.New("Git dependency registry is invalid")
 	}
-	if document.SchemaVersion != 2 || !stableSemverPattern.MatchString(document.ContractVersion) || !strings.HasPrefix(document.ContractVersion, "2.0.") {
+	if document.SchemaVersion != 2 || !supportedRegistryContract(document.ContractVersion) {
 		return Dependency{}, errors.New("Git dependency registry contract is unsupported")
 	}
 	var selected *registryDependency
@@ -102,6 +102,11 @@ func DependencyFromRegistry(data []byte) (Dependency, error) {
 		return Dependency{}, errors.New("Git dependency path is not canonical")
 	}
 	return Dependency{path: filepath.Clean(absolute), digest: selected.SHA256}, nil
+}
+
+func supportedRegistryContract(value string) bool {
+	match := stableSemverPattern.FindStringSubmatch(value)
+	return len(match) == 4 && match[1] == "2" && (match[2] == "0" || match[2] == "1")
 }
 
 type Result struct {
